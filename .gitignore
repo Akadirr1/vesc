@@ -5,3 +5,7 @@ node_modules/
 .graphify/branch.json
 .graphify/worktree.json
 .graphify/needs_update
+
+__pycache__/
+*.pyc
+.venv/

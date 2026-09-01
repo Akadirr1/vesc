@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VESC CAN Telemetri</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%233987e5'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --page:        #0d0d0d;
+    --surface:     #1a1a19;
+    --ink:         #ffffff;
+    --ink-2:       #c3c2b7;
+    --muted:       #898781;
+    --grid:        #2c2c2a;
+    --border:      rgba(255, 255, 255, 0.10);
+    --good:        #0ca30c;
+    --warning:     #fab219;
+    --critical:    #d03b3b;
+    --vesc-0:      #3987e5;
+    --vesc-1:      #d95926;
+    --vesc-2:      #199e70;
+    --vesc-3:      #c98500;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+  /* ---- top bar ---- */
+  .topbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 14px; margin-bottom: 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .topbar h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .01em; }
+  .topbar .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 11px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--ink-2); white-space: nowrap;
+  }
+  .pill b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .pill.ok .dot   { background: var(--good); }
+  .pill.warn .dot { background: var(--warning); }
+  .pill.err .dot  { background: var(--critical); }
+  .pill.ok   { color: var(--ink); }
+
+  /* ---- VESC cards ---- */
+  .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  @media (max-width: 720px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    position: relative;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px;
+    transition: opacity .3s;
+  }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .card-head .swatch { width: 10px; height: 10px; border-radius: 3px; }
+  .card-head .name { font-weight: 650; color: var(--ink); }
+  .badge-offline {
+    display: none; margin-left: auto;
+    font-size: 11px; font-weight: 700; letter-spacing: .08em;
+    color: var(--critical); border: 1px solid var(--critical);
+    padding: 1px 8px; border-radius: 999px;
+  }
+  .card.offline { opacity: .42; filter: grayscale(.65); }
+  .card.offline .badge-offline { display: inline-block; }
+
+  .rpm-row { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 10px; }
+  .rpm-val { font-size: 40px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  .rpm-unit { color: var(--muted); font-size: 13px; }
+  .erpm { color: var(--muted); font-size: 12px; margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  .metrics {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 14px;
+  }
+  @media (max-width: 980px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+  .metric .k { color: var(--muted); font-size: 11px; }
+  .metric .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .metric .v small { font-size: 11px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+  .v.t-good { color: var(--good); }
+  .v.t-warn { color: var(--warning); }
+  .v.t-crit { color: var(--critical); }
+
+  /* ---- chart ---- */
+  .chart-card {
+    margin-top: 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .chart-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .chart-head h2 { font-size: 14px; font-weight: 650; margin: 0; }
+  .chart-head select {
+    margin-left: auto;
+    background: var(--page); color: var(--ink);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; font: inherit;
+  }
+  .chart-box { position: relative; height: 260px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <h1>VESC CAN Telemetri</h1>
+    <span class="spacer"></span>
+    <span class="pill" id="pill-bus"><span class="dot"></span><span id="bus-text">bağlanıyor…</span></span>
+    <span class="pill"><span>Σ giriş gücü</span><b id="power">—</b></span>
+    <span class="pill"><span>frame</span><b id="fps">—</b><span>fps</span></span>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Son 60 saniye</h2>
+      <select id="metric-select">
+        <option value="rpm" selected>RPM</option>
+        <option value="current">Motor akımı (A)</option>
+        <option value="temp">FET sıcaklığı (°C)</option>
+        <option value="voltage">Giriş voltajı (V)</option>
+      </select>
+    </div>
+    <div class="chart-box"><canvas id="chart"></canvas></div>
+  </div>
+</div>
+
+<script src="/static/chart.umd.min.js"></script>
+<script>
+"use strict";
+
+const VESC_IDS = [0, 1, 2, 3];
+const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"];
+const WINDOW_S = 60;
+
+const METRICS = {
+  rpm:     { key: "rpm",           label: "RPM" },
+  current: { key: "current_motor", label: "Motor akımı (A)" },
+  temp:    { key: "temp_fet",      label: "FET sıcaklığı (°C)" },
+  voltage: { key: "v_in",          label: "Giriş voltajı (V)" },
+};
+
+/* ---------- VESC cards ---------- */
+
+const cardRefs = {};
+const cardsEl = document.getElementById("cards");
+for (const vid of VESC_IDS) {
+  const card = document.createElement("div");
+  card.className = "card offline";
+  card.innerHTML = `
+    <div class="card-head">
+      <span class="swatch" style="background:${SERIES[vid]}"></span>
+      <span class="name">VESC ${vid}</span>
+      <span class="badge-offline">OFFLINE</span>
+    </div>
+    <div class="rpm-row">
+      <span class="rpm-val" data-f="rpm">—</span><span class="rpm-unit">RPM</span>
+      <span class="erpm" data-f="erpm"></span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="k">Duty</div>       <div class="v" data-f="duty">—</div></div>
+      <div class="metric"><div class="k">Motor akımı</div><div class="v" data-f="current_motor">—</div></div>
+      <div class="metric"><div class="k">Giriş akımı</div><div class="v" data-f="current_in">—</div></div>
+      <div class="metric"><div class="k">Voltaj</div>     <div class="v" data-f="v_in">—</div></div>
+      <div class="metric"><div class="k">FET sıcaklığı</div>  <div class="v" data-f="temp_fet">—</div></div>
+      <div class="metric"><div class="k">Motor sıcaklığı</div><div class="v" data-f="temp_motor">—</div></div>
+      <div class="metric"><div class="k">Ah harcanan</div><div class="v" data-f="ah_used">—</div></div>
+      <div class="metric"><div class="k">Wh harcanan</div><div class="v" data-f="wh_used">—</div></div>
+    </div>`;
+  cardsEl.appendChild(card);
+  const f = {};
+  card.querySelectorAll("[data-f]").forEach((el) => { f[el.dataset.f] = el; });
+  cardRefs[vid] = { card, f };
+}
+
+const fmt = (v, d = 1) => (v == null ? "—" : v.toFixed(d));
+const unit = (val, u) => (val === "—" ? "—" : `${val}<small>${u}</small>`);
+
+function tempClass(t) {
+  if (t == null) return "";
+  if (t > 80) return "t-crit";
+  if (t >= 60) return "t-warn";
+  return "t-good";
+}
+
+function renderCard(vid, d) {
+  const { card, f } = cardRefs[vid];
+  card.classList.toggle("offline", !d || !d.online);
+  if (!d) return;
+  f.rpm.textContent = d.rpm == null ? "—" : Math.round(d.rpm).toLocaleString("tr-TR");
+  f.erpm.textContent = d.erpm == null ? "" : `ERPM ${Math.round(d.erpm).toLocaleString("tr-TR")}`;
+  f.duty.innerHTML = unit(fmt(d.duty == null ? null : d.duty * 100, 1), "%");
+  f.current_motor.innerHTML = unit(fmt(d.current_motor), "A");
+  f.current_in.innerHTML = unit(fmt(d.current_in), "A");
+  f.v_in.innerHTML = unit(fmt(d.v_in), "V");
+  f.temp_fet.innerHTML = unit(fmt(d.temp_fet), "°C");
+  f.temp_fet.className = "v " + tempClass(d.temp_fet);
+  f.temp_motor.innerHTML = unit(fmt(d.temp_motor), "°C");
+  f.temp_motor.className = "v " + tempClass(d.temp_motor);
+  f.ah_used.innerHTML = unit(fmt(d.ah_used, 3), "Ah");
+  f.wh_used.innerHTML = unit(fmt(d.wh_used, 1), "Wh");
+}
+
+/* ---------- time chart ---------- */
+
+// history[metric][vid] = [{t, v}, ...] (client clock, pruned to WINDOW_S)
+const history = {};
+for (const m of Object.keys(METRICS)) {
+  history[m] = {};
+  for (const vid of VESC_IDS) history[m][vid] = [];
+}
+let activeMetric = "rpm";
+
+const css = getComputedStyle(document.documentElement);
+Chart.defaults.color = css.getPropertyValue("--muted").trim();
+Chart.defaults.borderColor = css.getPropertyValue("--grid").trim();
+Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+
+const chart = new Chart(document.getElementById("chart"), {
+  type: "line",
+  data: {
+    datasets: VESC_IDS.map((vid) => ({
+      label: `VESC ${vid}`,
+      data: [],
+      borderColor: SERIES[vid],
+      backgroundColor: SERIES[vid],
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      spanGaps: false,
+      parsing: false,
+    })),
+  },
+  options: {
+    animation: false,
+    normalized: true,
+    maintainAspectRatio: false,
+    interaction: { mode: "nearest", axis: "x", intersect: false },
+    scales: {
+      x: {
+        type: "linear", min: -WINDOW_S, max: 0,
+        ticks: { callback: (v) => `${v}s`, maxTicksLimit: 7 },
+        grid: { color: css.getPropertyValue("--grid").trim() },
+      },
+      y: {
+        title: { display: true, text: METRICS.rpm.label },
+        grace: "8%",
+        grid: { color: css.getPropertyValue("--grid").trim() },
+      },
+    },
+    plugins: {
+      legend: {
+        position: "top", align: "end",
+        labels: { usePointStyle: true, pointStyle: "circle", boxWidth: 7, boxHeight: 7,
+                  color: css.getPropertyValue("--ink-2").trim() },
+      },
+      tooltip: {
+        backgroundColor: "#262624",
+        callbacks: { title: (items) => `${items[0].parsed.x.toFixed(1)} s` },
+      },
+    },
+  },
+});
+
+document.getElementById("metric-select").addEventListener("change", (e) => {
+  activeMetric = e.target.value;
+  chart.options.scales.y.title.text = METRICS[activeMetric].label;
+  refreshChart();
+});
+
+function refreshChart() {
+  const now = performance.now() / 1000;
+  chart.data.datasets.forEach((ds, i) => {
+    ds.data = history[activeMetric][VESC_IDS[i]].map((p) => ({ x: p.t - now, y: p.v }));
+  });
+  chart.update("none");
+}
+
+/* ---------- WebSocket + top bar ---------- */
+
+const pillBus = document.getElementById("pill-bus");
+const busText = document.getElementById("bus-text");
+const powerEl = document.getElementById("power");
+const fpsEl = document.getElementById("fps");
+let lastMsgAt = 0;
+let serverDown = true;
+
+const BUS_LABELS = {
+  connected:    ["ok",   (p) => `bağlı · ${p || ""}`],
+  mock:         ["ok",   () => "mock veri"],
+  reconnecting: ["warn", () => "yeniden bağlanıyor…"],
+  starting:     ["warn", () => "başlatılıyor…"],
+};
+
+function setBusPill(cls, text) {
+  pillBus.className = "pill " + cls;
+  busText.textContent = text;
+}
+
+function onSnapshot(snap) {
+  lastMsgAt = performance.now();
+  serverDown = false;
+
+  const [cls, label] = BUS_LABELS[snap.bus.status] || ["warn", () => snap.bus.status];
+  setBusPill(cls, label(snap.bus.port));
+  fpsEl.textContent = Math.round(snap.bus.fps);
+
+  const now = performance.now() / 1000;
+  let power = 0, powerKnown = false;
+  for (const vid of VESC_IDS) {
+    const d = snap.vescs[String(vid)];
+    renderCard(vid, d);
+    if (d && d.online) {
+      if (d.v_in != null && d.current_in != null) { power += d.v_in * d.current_in; powerKnown = true; }
+      for (const [m, def] of Object.entries(METRICS)) {
+        const v = d[def.key];
+        if (v != null) {
+          const buf = history[m][vid];
+          buf.push({ t: now, v });
+          while (buf.length && buf[0].t < now - WINDOW_S - 2) buf.shift();
+        }
+      }
+    }
+  }
+  powerEl.textContent = powerKnown ? `${Math.round(power)} W` : "—";
+  refreshChart();
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onmessage = (ev) => onSnapshot(JSON.parse(ev.data));
+  ws.onclose = () => setTimeout(connect, 1000);
+  ws.onerror = () => ws.close();
+}
+connect();
+
+// Watchdog: if the server stops pushing (or WS is down), gray everything out.
+setInterval(() => {
+  if (performance.now() - lastMsgAt > 2000) {
+    if (!serverDown) {
+      serverDown = true;
+      for (const vid of VESC_IDS) cardRefs[vid].card.classList.add("offline");
+      powerEl.textContent = "—";
+      fpsEl.textContent = "—";
+    }
+    setBusPill("err", "sunucu bağlantısı yok");
+    refreshChart(); // keeps the window sliding while data is stale
+  }
+}, 500);
+</script>
+</body>
+</html>

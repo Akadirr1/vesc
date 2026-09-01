@@ -4,16 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-`vesc` is an early-stage Node.js project (Node.js >= 20 required). There is no application source code yet — the repository currently contains project scaffolding and the graphify knowledge-graph tooling described below.
+`vesc` is a VESC CAN telemetry dashboard: a Python 3.11+ FastAPI backend (`backend/main.py`) that reads VESC status frames from an SLCAN adapter (ArduPilot SLCAN passthrough on a Cube Orange) and pushes state to a single-page dark-theme UI (`backend/static/index.html`, vanilla JS + vendored Chart.js, no build step) over a WebSocket at 10 Hz.
+
+Architecture (all in `backend/main.py`): a CAN reader thread (or `--mock` generator thread) parses VESC STATUS 1–6 frames (extended ID = `(command_id << 8) | vesc_id`, big-endian) into a lock-protected `TelemetryState`; an asyncio broadcaster task snapshots it at 10 Hz and fans out to `/ws` clients. VESC IDs 0–3; everything else on the bus is ignored. `npm`/`package.json` exist only for the graphify tooling below.
 
 ## Commands
 
 ```bash
-npm install                 # install dependencies (includes @sentropic/graphify)
-npx graphify --version      # verify the graphify CLI
+pip install -r requirements.txt     # Python deps (python-can, FastAPI, uvicorn)
+python backend/main.py --mock       # run the dashboard with fake data (no hardware)
+python backend/main.py              # real SLCAN bus (auto-detects /dev/tty.usbmodem*)
+npm install                         # graphify tooling only
+npx graphify --version              # verify the graphify CLI
 ```
 
-There are no build, lint, or test scripts defined yet. When they are added to `package.json`, document them here.
+The dashboard serves on http://localhost:8000. There are no lint or test scripts defined yet; when they are added, document them here. Chart.js is vendored at `backend/static/chart.umd.min.js` — the UI must keep working offline, so don't replace it with a CDN reference.
 
 ## Claude Code integration
 
