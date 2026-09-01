@@ -9,3 +9,5 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
+.graphify/.graphify_*
+backend/.graphify/
