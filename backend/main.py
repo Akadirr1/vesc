@@ -5,6 +5,15 @@ Reads VESC CAN status frames over an SLCAN adapter (ArduPilot SLCAN
 passthrough on a Cube Orange), keeps the latest telemetry per VESC in a
 thread-safe dict and pushes it to browsers over a WebSocket at 10 Hz.
 
+Frame layouts are verified against the VESC firmware source at tag 5.02
+(vedderb/bldc: comm_can.c, commands.c, datatypes.h) — see
+docs/CAN_PROTOCOL_FW52.md for the source-cited protocol reference.
+FW 5.2 broadcasts STATUS 1-5 only; CAN_PACKET_STATUS_6 (ADC/PPM) exists
+only from FW 6.00 on, as command id 58 (enable with --fw 6.0). Fault codes
+are not broadcast on any firmware, so they are polled at 1 Hz per VESC via
+CAN_PACKET_PROCESS_SHORT_BUFFER + COMM_GET_VALUES_SELECTIVE with a
+fault-only mask — request and reply each fit in a single CAN frame.
+
 Run:  python backend/main.py            (real bus, auto-detects /dev/tty.usbmodem*)
       python backend/main.py --mock     (fake data for UI development)
 """
@@ -53,6 +62,12 @@ class Config:
     vesc_ids: tuple[int, ...] = (0, 1, 2, 3)
     host: str = "127.0.0.1"
     http_port: int = 8000
+    fw: str = "5.2"          # "5.2" or "6.0" — selects which status frames exist
+    poll_faults: bool = True  # poll fault codes over CAN (real bus only)
+    dash_id: int = 250        # our controller id on the VESC CAN protocol (must not collide with VESC ids)
+
+    def __post_init__(self) -> None:
+        self.parsers = parsers_for_fw(self.fw)
 
 
 class TelemetryState:
@@ -91,6 +106,16 @@ class TelemetryState:
                 c["online"] = age is not None and age < OFFLINE_AFTER_S
                 if "erpm" in c:
                     c["rpm"] = round(c["erpm"] / pole_pairs, 1)
+                # No motor NTC connected (e.g. sensorless thruster motors):
+                # the firmware reads an open input as deeply negative and clamps
+                # invalid values to -100 °C. Report "no sensor" instead.
+                tm = c.get("temp_motor")
+                if tm is not None and tm <= MOTOR_TEMP_SENSOR_MISSING_BELOW_C:
+                    c["temp_motor"] = None
+                    c["motor_temp_sensor"] = False
+                if "fault" in c:
+                    f = c["fault"]
+                    c["fault_name"] = FAULT_CODES[f] if 0 <= f < len(FAULT_CODES) else f"CODE_{f}"
                 vescs[str(vid)] = c
             return {
                 "t": round(now, 3),
@@ -104,14 +129,36 @@ class TelemetryState:
             }
 
 
-CONFIG = Config()
-STATE = TelemetryState(CONFIG.vesc_ids)
-
-
 # ---------------------------------------------------------------------------
 # VESC CAN frame parsing
 # ---------------------------------------------------------------------------
 # Extended (29-bit) arbitration ID: (command_id << 8) | vesc_id, big-endian payload.
+# Command ids and scales verified against vedderb/bldc tag 5.02 (comm_can.c,
+# datatypes.h CAN_PACKET_ID enum). On FW 5.2 command 28 is
+# CAN_PACKET_POLL_TS5700N8501_STATUS (encoder), NOT a status frame;
+# CAN_PACKET_STATUS_6 only exists from FW 6.00 on, as command id 58.
+
+CAN_PACKET_PROCESS_SHORT_BUFFER = 8
+COMM_GET_VALUES_SELECTIVE = 50
+GET_VALUES_MASK_FAULT = 1 << 15  # commands.c: fault code is bit 15 of the selective mask
+
+# datatypes.h (tag 5.02): mc_fault_code, values 0-25
+FAULT_CODES = (
+    "NONE", "OVER_VOLTAGE", "UNDER_VOLTAGE", "DRV", "ABS_OVER_CURRENT",
+    "OVER_TEMP_FET", "OVER_TEMP_MOTOR", "GATE_DRIVER_OVER_VOLTAGE",
+    "GATE_DRIVER_UNDER_VOLTAGE", "MCU_UNDER_VOLTAGE",
+    "BOOTING_FROM_WATCHDOG_RESET", "ENCODER_SPI",
+    "ENCODER_SINCOS_BELOW_MIN_AMPLITUDE", "ENCODER_SINCOS_ABOVE_MAX_AMPLITUDE",
+    "FLASH_CORRUPTION", "HIGH_OFFSET_CURRENT_SENSOR_1",
+    "HIGH_OFFSET_CURRENT_SENSOR_2", "HIGH_OFFSET_CURRENT_SENSOR_3",
+    "UNBALANCED_CURRENTS", "BRK", "RESOLVER_LOT", "RESOLVER_DOS",
+    "RESOLVER_LOS", "FLASH_CORRUPTION_APP_CFG", "FLASH_CORRUPTION_MC_CFG",
+    "ENCODER_NO_MAGNET",
+)
+
+# mc_interface.c clamps an invalid/absent motor NTC reading to -100 °C, and an
+# open sensor input reads deeply negative — below this the sensor is missing.
+MOTOR_TEMP_SENSOR_MISSING_BELOW_C = -50.0
 
 def _i16(data: bytes, offset: int) -> int:
     return struct.unpack_from(">h", data, offset)[0]
@@ -159,7 +206,7 @@ def _parse_status_5(d: bytes) -> dict:  # CAN_PACKET_STATUS_5 (27)
     }
 
 
-def _parse_status_6(d: bytes) -> dict:  # CAN_PACKET_STATUS_6 (28)
+def _parse_status_6(d: bytes) -> dict:  # CAN_PACKET_STATUS_6 (58, FW 6.00+)
     return {
         "adc1": _i16(d, 0) / 1000.0,
         "adc2": _i16(d, 2) / 1000.0,
@@ -169,22 +216,56 @@ def _parse_status_6(d: bytes) -> dict:  # CAN_PACKET_STATUS_6 (28)
 
 
 # command_id -> (parser, minimum payload length)
-PARSERS = {
+PARSERS_FW52 = {
     9: (_parse_status, 8),
     14: (_parse_status_2, 8),
     15: (_parse_status_3, 8),
     16: (_parse_status_4, 8),
-    27: (_parse_status_5, 6),
-    28: (_parse_status_6, 8),
+    27: (_parse_status_5, 6),  # 8 bytes on the wire; bytes 6-7 are reserved
 }
+PARSERS_FW60 = {**PARSERS_FW52, 58: (_parse_status_6, 8)}
+
+
+def parsers_for_fw(fw: str) -> dict:
+    return PARSERS_FW60 if fw.startswith("6") else PARSERS_FW52
+
+
+CONFIG = Config()
+STATE = TelemetryState(CONFIG.vesc_ids)
+
+
+def build_fault_poll_frame(target_vesc_id: int, dash_id: int) -> tuple[int, bytes]:
+    """(arbitration_id, data) asking `target_vesc_id` for its fault code.
+
+    comm_can.c CAN_PACKET_PROCESS_SHORT_BUFFER: data = [reply_to_id,
+    process_mode(0 = process and reply over CAN), COMM payload...]. The COMM
+    payload is COMM_GET_VALUES_SELECTIVE + uint32 mask (fault only).
+    """
+    arb = (CAN_PACKET_PROCESS_SHORT_BUFFER << 8) | target_vesc_id
+    data = bytes([dash_id, 0x00, COMM_GET_VALUES_SELECTIVE]) \
+        + GET_VALUES_MASK_FAULT.to_bytes(4, "big")
+    return arb, data
 
 
 def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: TelemetryState) -> None:
     vesc_id = arbitration_id & 0xFF
     command_id = (arbitration_id >> 8) & 0xFF
+
+    # Reply to our fault poll: addressed to dash_id, sent via short buffer.
+    # comm_can_send_buffer (<=6 byte payloads): data = [vesc_controller_id,
+    # send_flag, COMM_GET_VALUES_SELECTIVE, mask(4), fault(1)] = 8 bytes.
+    if command_id == CAN_PACKET_PROCESS_SHORT_BUFFER and vesc_id == cfg.dash_id:
+        if len(data) >= 8 and data[2] == COMM_GET_VALUES_SELECTIVE:
+            responder = data[0]
+            mask = int.from_bytes(data[3:7], "big")
+            if responder in cfg.vesc_ids and mask == GET_VALUES_MASK_FAULT:
+                fault = data[7]
+                state.update(responder, {"fault": fault})
+        return
+
     if vesc_id not in cfg.vesc_ids:
         return
-    entry = PARSERS.get(command_id)
+    entry = cfg.parsers.get(command_id)
     if entry is None:
         return  # other bus traffic — ignore silently
     parser, min_len = entry
@@ -232,6 +313,26 @@ def resolve_port(preferred: str | None) -> str | None:
     return ports[0]
 
 
+class BusHolder:
+    """Shares the live can.Bus between the reader thread (owner) and the
+    fault poller thread (sender). `bus` is None while disconnected."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.bus = None
+
+    def set(self, bus) -> None:
+        with self.lock:
+            self.bus = bus
+
+    def get(self):
+        with self.lock:
+            return self.bus
+
+
+BUS_HOLDER = BusHolder()
+
+
 def can_reader(cfg: Config, state: TelemetryState, stop: threading.Event) -> None:
     import can  # imported here so --mock works without an adapter attached
 
@@ -246,6 +347,7 @@ def can_reader(cfg: Config, state: TelemetryState, stop: threading.Event) -> Non
         try:
             bus = can.Bus(interface="slcan", channel=port, bitrate=cfg.bitrate)
             preferred = port
+            BUS_HOLDER.set(bus)
             state.set_bus("connected", port)
             log.info("CAN bağlandı: %s @ %d bit/s", port, cfg.bitrate)
             while not stop.is_set():
@@ -259,12 +361,35 @@ def can_reader(cfg: Config, state: TelemetryState, stop: threading.Event) -> Non
             log.warning("CAN bus hatası (%s) — yeniden bağlanılacak", exc)
             state.set_bus("reconnecting", port)
         finally:
+            BUS_HOLDER.set(None)
             if bus is not None:
                 try:
                     bus.shutdown()
                 except Exception:
                     pass
         stop.wait(2.0)
+
+
+def fault_poller(cfg: Config, stop: threading.Event) -> None:
+    """Asks each VESC for its fault code roughly once a second (staggered).
+    Faults are not part of the STATUS broadcasts on any firmware, so this is
+    the only way to see e.g. ABS_OVER_CURRENT or UNDER_VOLTAGE remotely."""
+    import can
+
+    targets = list(cfg.vesc_ids)
+    i = 0
+    while not stop.is_set():
+        stop.wait(1.0 / max(len(targets), 1))
+        bus = BUS_HOLDER.get()
+        if bus is None:
+            continue
+        vid = targets[i % len(targets)]
+        i += 1
+        arb, data = build_fault_poll_frame(vid, cfg.dash_id)
+        try:
+            bus.send(can.Message(arbitration_id=arb, data=data, is_extended_id=True))
+        except Exception:
+            pass  # bus is going away; the reader thread handles reconnection
 
 
 # ---------------------------------------------------------------------------
@@ -296,11 +421,12 @@ def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) ->
             v_in = 39.5 - 0.06 * i_in - 0.4 * math.sin(t / 40) + random.uniform(-0.05, 0.05)
             base, swing = temp_profile[vid]
             temp_fet = base + swing * math.sin(t / 25 + ph) + random.uniform(-0.3, 0.3)
-            temp_motor = temp_fet + 6 + 3 * math.sin(t / 18 + ph)
             ah[vid] += i_in * dt / 3600.0
             wh[vid] += v_in * i_in * dt / 3600.0
             tacho[vid] += erpm / 60.0 * 6.0 * dt
-            state.update(vid, {
+            # Sensorless motors without an NTC: firmware reports the clamped
+            # -100 °C sentinel, exactly like the real bus would.
+            fields = {
                 "erpm": int(erpm),
                 "current_motor": i_mot,
                 "duty": duty,
@@ -309,16 +435,22 @@ def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) ->
                 "wh_used": wh[vid],
                 "wh_charged": wh[vid] * 0.04,
                 "temp_fet": temp_fet,
-                "temp_motor": temp_motor,
+                "temp_motor": -100.0,
                 "current_in": i_in,
                 "pid_pos": (t * 10 + vid * 90) % 360,
                 "tacho": int(tacho[vid]),
                 "v_in": v_in,
-                "adc1": 1.65 + 0.4 * math.sin(t / 7 + ph),
-                "adc2": 1.65 + 0.4 * math.cos(t / 9 + ph),
-                "adc3": 0.8 + 0.2 * math.sin(t / 5 + ph),
-                "ppm": 0.5 + 0.45 * math.sin(t / 6 + ph),
-            }, frames=6)  # emulates the 6 status frames per update
+                # VESC 1 raises ABS_OVER_CURRENT for 6 s out of every 40 s.
+                "fault": 4 if (vid == 1 and t % 40 < 6) else 0,
+            }
+            if cfg.fw.startswith("6"):  # STATUS_6 exists only on FW 6.00+
+                fields.update({
+                    "adc1": 1.65 + 0.4 * math.sin(t / 7 + ph),
+                    "adc2": 1.65 + 0.4 * math.cos(t / 9 + ph),
+                    "adc3": 0.8 + 0.2 * math.sin(t / 5 + ph),
+                    "ppm": 0.5 + 0.45 * math.sin(t / 6 + ph),
+                })
+            state.update(vid, fields, frames=5)  # STATUS 1-5 per update
         stop.wait(0.1)
 
 
@@ -356,6 +488,8 @@ async def lifespan(app: FastAPI):
     target = mock_generator if CONFIG.mock else can_reader
     reader = threading.Thread(target=target, args=(CONFIG, STATE, stop), daemon=True)
     reader.start()
+    if not CONFIG.mock and CONFIG.poll_faults:
+        threading.Thread(target=fault_poller, args=(CONFIG, stop), daemon=True).start()
     task = asyncio.create_task(broadcaster())
     yield
     stop.set()
@@ -396,11 +530,18 @@ def parse_args() -> Config:
     p.add_argument("--bitrate", type=int, default=500_000, help="CAN bitrate (varsayılan 500000)")
     p.add_argument("--pole-pairs", type=int, default=7,
                    help="motor kutup çifti sayısı, RPM = ERPM / pole_pairs (varsayılan 7)")
+    p.add_argument("--fw", choices=("5.2", "6.0"), default="5.2",
+                   help="VESC firmware sürümü: 5.2 = STATUS 1-5; 6.0 STATUS_6'yı (cmd 58, ADC/PPM) ekler")
+    p.add_argument("--no-poll-faults", action="store_true",
+                   help="fault kodu sorgulamayı kapat (varsayılan: her VESC ~1 Hz sorgulanır)")
+    p.add_argument("--dash-id", type=int, default=250,
+                   help="dashboard'un VESC CAN protokolündeki controller id'si (varsayılan 250)")
     p.add_argument("--host", default="127.0.0.1", help="HTTP host (varsayılan 127.0.0.1)")
     p.add_argument("--http-port", type=int, default=8000, help="HTTP port (varsayılan 8000)")
     a = p.parse_args()
     return Config(mock=a.mock, port=a.port, bitrate=a.bitrate,
-                  pole_pairs=a.pole_pairs, host=a.host, http_port=a.http_port)
+                  pole_pairs=a.pole_pairs, host=a.host, http_port=a.http_port,
+                  fw=a.fw, poll_faults=not a.no_poll_faults, dash_id=a.dash_id)
 
 
 def main() -> None:

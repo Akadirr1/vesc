@@ -64,14 +64,18 @@
   .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .card-head .swatch { width: 10px; height: 10px; border-radius: 3px; }
   .card-head .name { font-weight: 650; color: var(--ink); }
-  .badge-offline {
-    display: none; margin-left: auto;
+  .badges { margin-left: auto; display: flex; gap: 6px; }
+  .badge-offline, .badge-fault {
+    display: none;
     font-size: 11px; font-weight: 700; letter-spacing: .08em;
     color: var(--critical); border: 1px solid var(--critical);
-    padding: 1px 8px; border-radius: 999px;
+    padding: 1px 8px; border-radius: 999px; white-space: nowrap;
   }
+  .badge-fault { background: var(--critical); color: #fff; }
   .card.offline { opacity: .42; filter: grayscale(.65); }
   .card.offline .badge-offline { display: inline-block; }
+  .card.fault .badge-fault { display: inline-block; }
+  .card.fault { border-color: var(--critical); }
 
   .rpm-row { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 10px; }
   .rpm-val { font-size: 40px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
@@ -158,7 +162,10 @@ for (const vid of VESC_IDS) {
     <div class="card-head">
       <span class="swatch" style="background:${SERIES[vid]}"></span>
       <span class="name">VESC ${vid}</span>
-      <span class="badge-offline">OFFLINE</span>
+      <span class="badges">
+        <span class="badge-fault" data-f="fault"></span>
+        <span class="badge-offline">OFFLINE</span>
+      </span>
     </div>
     <div class="rpm-row">
       <span class="rpm-val" data-f="rpm">—</span><span class="rpm-unit">RPM</span>
@@ -194,6 +201,9 @@ function renderCard(vid, d) {
   const { card, f } = cardRefs[vid];
   card.classList.toggle("offline", !d || !d.online);
   if (!d) return;
+  const hasFault = d.fault != null && d.fault !== 0;
+  card.classList.toggle("fault", hasFault);
+  f.fault.textContent = hasFault ? (d.fault_name || `FAULT ${d.fault}`) : "";
   f.rpm.textContent = d.rpm == null ? "—" : Math.round(d.rpm).toLocaleString("tr-TR");
   f.erpm.textContent = d.erpm == null ? "" : `ERPM ${Math.round(d.erpm).toLocaleString("tr-TR")}`;
   f.duty.innerHTML = unit(fmt(d.duty == null ? null : d.duty * 100, 1), "%");
@@ -204,6 +214,7 @@ function renderCard(vid, d) {
   f.temp_fet.className = "v " + tempClass(d.temp_fet);
   f.temp_motor.innerHTML = unit(fmt(d.temp_motor), "°C");
   f.temp_motor.className = "v " + tempClass(d.temp_motor);
+  f.temp_motor.title = d.motor_temp_sensor === false ? "Motor NTC bağlı değil (sensorless)" : "";
   f.ah_used.innerHTML = unit(fmt(d.ah_used, 3), "Ah");
   f.wh_used.innerHTML = unit(fmt(d.wh_used, 1), "Wh");
 }
