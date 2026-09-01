@@ -1,0 +1,42 @@
+{
+  ".claude/CLAUDE.md": {
+    "mtime": 1788278581496.4854,
+    "hash": "db73b0edd7ffbc61ceac177130730865"
+  },
+  ".claude/skills/graphify/SKILL.md": {
+    "mtime": 1788278625650.9905,
+    "hash": "c1571f7a7f451058f7ef8173f62d2063"
+  },
+  "CLAUDE.md": {
+    "mtime": 1788289155356.2402,
+    "hash": "384b28ffd2a55704d1613f1c7109d726"
+  },
+  "README.md": {
+    "mtime": 1788289099772.2405,
+    "hash": "236a8fd66b39e21e86fc6560a70b0d24"
+  },
+  "backend/main.py": {
+    "mtime": 1788289183896.24,
+    "hash": "e8acd66e24913a4905a23f16f3d39a83"
+  },
+  "backend/static/chart.umd.min.js": {
+    "mtime": 1788279239948.19,
+    "hash": "3a1612b2a2ed332a6c1793fc73fa564a"
+  },
+  "backend/static/index.html": {
+    "mtime": 1788289045940.241,
+    "hash": "495dff67ca84eac37c57c44817ac3744"
+  },
+  "requirements.txt": {
+    "mtime": 1788279481448.2043,
+    "hash": "828e490a93637b16131fe4061602f817"
+  },
+  ".graphify/GRAPH_REPORT.md": {
+    "mtime": 1788281089960.3,
+    "hash": "406cee32ede49965f5d5c61166681d8e"
+  },
+  "docs/CAN_PROTOCOL_FW52.md": {
+    "mtime": 1788289131964.2405,
+    "hash": "816afcb2f1c618758a7a8441873fd039"
+  }
+}
