@@ -315,6 +315,7 @@ let serverDown = true;
 const BUS_LABELS = {
   connected:    ["ok",   (p) => `bağlı · ${p || ""}`],
   probing:      ["warn", (p) => `port deneniyor · ${p || ""}`],
+  mavlink:      ["ok",   (p) => `MAVLink · ${p || ""}`],
   mock:         ["ok",   () => "mock veri"],
   reconnecting: ["warn", () => "yeniden bağlanıyor…"],
   starting:     ["warn", () => "başlatılıyor…"],

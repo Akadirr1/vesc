@@ -272,3 +272,51 @@ Poll istekleri ArduPilot'ta `push_Frame → rx_queue_` ile CAN'e aktarılır; TX
 mailbox'ı 8 denemede boşalmazsa frame düşer (`receive()` kuyruğu). Bu yüzden
 yalnız **online** VESC'ler sorgulanır — ACK'lenmeyecek frame ArduPilot'un hata
 sayaçlarını boşuna artırır.
+
+## 9. v2 — MAVLink deniz hattı (companion → Cube → radyo → kara)
+
+Companion `MAV_COMP_ID_ONBOARD_COMPUTER` (191) olarak, otopilotla aynı sysid
+ile Cube'un TELEM2'sine yazar. ArduPilot `MAVLink_routing.cpp`
+`check_and_forward()`: `broadcast_system` (target_system 0) mesajlar öğrenilen
+tüm rotalara (GCS'nin görüldüğü radyo kanalı dahil) iletilir — doğrulandı.
+
+### Gönderilen mesajlar (`backend/uplink.py`, `--uplink-rate`, varsayılan 1 Hz)
+
+| Mesaj | Kaynak alan → MAVLink alanı | Not |
+|---|---|---|
+| `HEARTBEAT` (0) | type ONBOARD_CONTROLLER, autopilot INVALID | 1 Hz, router/GCS bileşeni görsün |
+| `ESC_TELEMETRY_1_TO_4` (ardupilotmega 11030) | temp_fet → temperature °C (u8); v_in → voltage cV (u16); \|current_motor\| → current cA (u16); ah_used → totalcurrent mAh (u16, 65.5 Ah'de sarar); \|rpm\| (mekanik) → rpm (u16); online tick sayacı → count | GCS-native; işaretler kaybolur |
+| `TUNNEL` (common 385), `payload_type = 0x5643` | aşağıdaki ikili paket | dashboard için tam veri |
+
+### TUNNEL payload (big-endian, sürüm 1, 4 + 20·N bayt)
+
+Başlık `>BHB`: version=1, seq (u16), N (kayıt sayısı). Kayıt `>BBBbhhHiHHbb`:
+
+| Alan | Tip | Ölçek | Sentinel |
+|---|---|---|---|
+| vesc_id | u8 | | |
+| flags | u8 | bit0 online, bit1 motor NTC var, bit2 fault bilgisi var | |
+| fault | u8 | mc_fault_code | |
+| duty | i8 | % | |
+| current_motor | i16 | cA (işaretli) | |
+| current_in | i16 | cA (işaretli) | |
+| v_in | u16 | cV | |
+| erpm | i32 | ×1 (işaretli) | |
+| ah_used | u16 | mAh | |
+| wh_used | u16 | 0.1 Wh | |
+| temp_fet | i8 | °C | −128 = hiç alınmadı |
+| temp_motor | i8 | °C | 127 = sensör yok → karada −100 sentinel'e çevrilir |
+
+Kara tarafı (`--mavlink-in`) TUNNEL kayıtlarını `TelemetryState.update()` ile
+işler; `online` biti 0 olan VESC güncellenmez (5 s sonra offline). TUNNEL 3 s
+gelmezse `ESC_TELEMETRY_1_TO_4` kayıplı yedek olarak kullanılır (`voltage == 0`
+= veri yok). Offline eşiği `--offline-after` (kara varsayılanı 5 s);
+`fps_expected` = online VESC × 1 × uplink hızı.
+
+### Kaynak doğrulamaları
+
+- `ESC_TELEMETRY_1_TO_4` alan tipleri: `message_definitions/v1.0/ardupilotmega.xml`
+  (id 11030: u8[4] temperature degC, u16[4] voltage cV, u16[4] current cA,
+  u16[4] totalcurrent mAh, u16[4] rpm, u16[4] count).
+- Broadcast yönlendirme: `libraries/GCS_MAVLink/MAVLink_routing.cpp:182–225`.
+- pymavlink 2.4.x: TUNNEL MAVLink2 gerektirir → `MAVLINK20=1`; `recv_match(type=[...])` list ister.
