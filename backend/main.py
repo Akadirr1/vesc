@@ -26,11 +26,10 @@ import logging
 import math
 import random
 import struct
-import sys
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import uvicorn
@@ -42,11 +41,15 @@ log = logging.getLogger("vesc-dash")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-# SLCAN serial device search patterns: macOS first (Cube Orange over USB),
-# then Linux as a fallback.
-PORT_GLOBS = ("/dev/tty.usbmodem*", "/dev/ttyACM*")
+# SLCAN serial device search patterns. macOS exposes each USB CDC port twice;
+# pyserial recommends the cu.* node (tty.* can block on open waiting for DCD),
+# so cu.* is preferred and the tty.* twin is dropped. Linux as a fallback.
+PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/tty.usbmodem*", "/dev/ttyACM*")
 
-OFFLINE_AFTER_S = 2.0  # no frame for this long -> VESC counts as offline
+OFFLINE_AFTER_S = 2.0   # no frame for this long -> VESC counts as offline
+PROBE_TIMEOUT_S = 3.0   # a candidate port must yield a VESC frame within this
+STALE_FAULT_S = 5.0     # fault older than this (no poll reply) is flagged stale
+STATUS_FRAMES_PER_TICK = 5  # FW 5.2 CAN_STATUS_1_2_3_4_5: 5 frames per rate tick
 
 
 # ---------------------------------------------------------------------------
@@ -65,9 +68,24 @@ class Config:
     fw: str = "5.2"          # "5.2" or "6.0" — selects which status frames exist
     poll_faults: bool = True  # poll fault codes over CAN (real bus only)
     dash_id: int = 250        # our controller id on the VESC CAN protocol (must not collide with VESC ids)
+    status_rate_hz: int = 50  # VESC "CAN Status Rate" — only used to estimate expected fps
 
     def __post_init__(self) -> None:
         self.parsers = parsers_for_fw(self.fw)
+
+    def validate(self) -> list[str]:
+        errors = []
+        if self.pole_pairs < 1:
+            errors.append("--pole-pairs en az 1 olmalı")
+        if not 0 <= self.dash_id <= 254:
+            errors.append("--dash-id 0-254 aralığında olmalı (255 = VESC broadcast)")
+        elif self.dash_id in self.vesc_ids:
+            errors.append(f"--dash-id {self.dash_id} bir VESC id'si ile çakışıyor")
+        if self.status_rate_hz < 1:
+            errors.append("--status-rate-hz en az 1 olmalı")
+        if not 1 <= self.http_port <= 65535:
+            errors.append("--http-port 1-65535 aralığında olmalı")
+        return errors
 
 
 class TelemetryState:
@@ -78,7 +96,8 @@ class TelemetryState:
         self._lock = threading.Lock()
         self.vescs: dict[int, dict] = {vid: {} for vid in vesc_ids}
         self.frames_total = 0
-        self.bus_status = "starting"  # starting | connected | reconnecting | mock
+        self.last_frame_t: float | None = None  # last accepted VESC frame (any id)
+        self.bus_status = "starting"  # starting | probing | connected | reconnecting | mock
         self.bus_port: str | None = None
 
     def update(self, vesc_id: int, fields: dict, frames: int = 1) -> None:
@@ -87,23 +106,35 @@ class TelemetryState:
             d = self.vescs[vesc_id]
             d.update(fields)
             d["last_seen"] = now
+            if "fault" in fields:
+                d["fault_seen"] = now
             self.frames_total += frames
+            self.last_frame_t = now
 
     def set_bus(self, status: str, port: str | None) -> None:
         with self._lock:
             self.bus_status = status
             self.bus_port = port
 
-    def snapshot(self, pole_pairs: int, fps: float) -> dict:
+    def is_online(self, vesc_id: int) -> bool:
+        with self._lock:
+            last_seen = self.vescs[vesc_id].get("last_seen")
+        return last_seen is not None and time.time() - last_seen < OFFLINE_AFTER_S
+
+    def snapshot(self, pole_pairs: int, fps: float, status_rate_hz: int) -> dict:
         now = time.time()
         with self._lock:
             vescs = {}
+            n_online = 0
             for vid, d in self.vescs.items():
                 c = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in d.items()}
                 last_seen = c.get("last_seen")
                 age = (now - last_seen) if last_seen else None
                 c["age"] = round(age, 2) if age is not None else None
                 c["online"] = age is not None and age < OFFLINE_AFTER_S
+                n_online += c["online"]
+                if "fault_seen" in c:
+                    c["fault_age"] = round(now - c.pop("fault_seen"), 1)
                 if "erpm" in c:
                     c["rpm"] = round(c["erpm"] / pole_pairs, 1)
                 # No motor NTC connected (e.g. sensorless thruster motors):
@@ -117,12 +148,16 @@ class TelemetryState:
                     f = c["fault"]
                     c["fault_name"] = FAULT_CODES[f] if 0 <= f < len(FAULT_CODES) else f"CODE_{f}"
                 vescs[str(vid)] = c
+            frame_age = (now - self.last_frame_t) if self.last_frame_t else None
             return {
                 "t": round(now, 3),
                 "bus": {
                     "status": self.bus_status,
                     "port": self.bus_port,
                     "fps": round(fps, 1),
+                    # expected CAN frame rate for the VESCs currently online
+                    "fps_expected": n_online * STATUS_FRAMES_PER_TICK * status_rate_hz,
+                    "frame_age": round(frame_age, 1) if frame_age is not None else None,
                 },
                 "pole_pairs": pole_pairs,
                 "vescs": vescs,
@@ -247,9 +282,15 @@ def build_fault_poll_frame(target_vesc_id: int, dash_id: int) -> tuple[int, byte
     return arb, data
 
 
-def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: TelemetryState) -> None:
+def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: TelemetryState) -> bool:
+    """Parse one extended frame; returns True if it was an accepted VESC frame.
+
+    The firmware compares the *whole* `eid >> 8` against CAN_PACKET_ID
+    (comm_can.c decode_msg), so bits 16-28 must be zero. Masking to 8 bits
+    would accept non-VESC traffic such as ArduPilot's DroneCAN frames.
+    """
     vesc_id = arbitration_id & 0xFF
-    command_id = (arbitration_id >> 8) & 0xFF
+    command_id = arbitration_id >> 8
 
     # Reply to our fault poll: addressed to dash_id, sent via short buffer.
     # comm_can_send_buffer (<=6 byte payloads): data = [vesc_controller_id,
@@ -259,19 +300,20 @@ def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: Telemetry
             responder = data[0]
             mask = int.from_bytes(data[3:7], "big")
             if responder in cfg.vesc_ids and mask == GET_VALUES_MASK_FAULT:
-                fault = data[7]
-                state.update(responder, {"fault": fault})
-        return
+                state.update(responder, {"fault": data[7]})
+                return True
+        return False
 
     if vesc_id not in cfg.vesc_ids:
-        return
+        return False
     entry = cfg.parsers.get(command_id)
     if entry is None:
-        return  # other bus traffic — ignore silently
+        return False  # other bus traffic — ignore silently
     parser, min_len = entry
     if len(data) < min_len:
-        return
+        return False
     state.update(vesc_id, parser(data))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -279,38 +321,19 @@ def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: Telemetry
 # ---------------------------------------------------------------------------
 
 def find_ports() -> list[str]:
+    """Candidate serial ports, cu.* preferred over its tty.* twin on macOS.
+    A Cube Orange exposes two USB CDC ports (SERIAL0 = MAVLink, SERIAL6 =
+    SLCAN), so the list normally has two entries and must be probed."""
     ports: list[str] = []
+    seen_devices: set[str] = set()
     for pattern in PORT_GLOBS:
-        ports.extend(sorted(glob.glob(pattern)))
+        for p in sorted(glob.glob(pattern)):
+            device = p.rsplit("/", 1)[-1].split(".", 1)[-1]  # "usbmodem1103" for cu./tty.
+            if device in seen_devices:
+                continue
+            seen_devices.add(device)
+            ports.append(p)
     return ports
-
-
-def choose_port_interactive(ports: list[str]) -> str:
-    if not sys.stdin.isatty():
-        log.warning("Birden fazla port var ama stdin tty değil; %s seçildi", ports[0])
-        return ports[0]
-    print("Birden fazla SLCAN portu bulundu:")
-    for i, p in enumerate(ports):
-        print(f"  [{i}] {p}")
-    while True:
-        raw = input(f"Port seç [0-{len(ports) - 1}]: ").strip()
-        if raw.isdigit() and int(raw) < len(ports):
-            return ports[int(raw)]
-        print("Geçersiz seçim.")
-
-
-def resolve_port(preferred: str | None) -> str | None:
-    """Pick the serial port for (re)connecting. Called from the reader thread,
-    so it never prompts: prefer the previously used port, otherwise take the
-    only match, otherwise the first one."""
-    ports = find_ports()
-    if not ports:
-        return None
-    if preferred and preferred in ports:
-        return preferred
-    if len(ports) > 1:
-        log.warning("Birden fazla port bulundu %s; %s kullanılıyor", ports, ports[0])
-    return ports[0]
 
 
 class BusHolder:
@@ -333,47 +356,87 @@ class BusHolder:
 BUS_HOLDER = BusHolder()
 
 
-def can_reader(cfg: Config, state: TelemetryState, stop: threading.Event) -> None:
+def run_bus(cfg: Config, state: TelemetryState, stop: threading.Event,
+            port: str, probing: bool) -> bool:
+    """Open `port` and pump frames until the bus fails or `stop` is set.
+
+    Returns True if the port ever produced a VESC frame. While `probing`, a
+    port that stays silent for PROBE_TIMEOUT_S is abandoned (returns False)
+    so the caller can try the next candidate — a Cube Orange's MAVLink port
+    accepts the SLCAN handshake silently and would otherwise look "connected".
+    """
     import can  # imported here so --mock works without an adapter attached
 
+    bus = None
+    got_frames = False
+    try:
+        # ArduPilot streams before "O" and python-can's default 2 s settle
+        # delay only matters for Arduino adapters; flush the partial line
+        # that is almost certainly sitting in the input buffer.
+        bus = can.Bus(interface="slcan", channel=port, bitrate=cfg.bitrate, sleep_after_open=0.3)
+        try:
+            bus.flush()
+        except Exception:
+            pass
+        BUS_HOLDER.set(bus)
+        state.set_bus("probing" if probing else "connected", port)
+        t_open = time.time()
+        while not stop.is_set():
+            try:
+                msg = bus.recv(timeout=0.5)
+            except (ValueError, IndexError, KeyError):
+                continue  # corrupted/partial SLCAN line — not a bus failure
+            if (msg is not None and msg.is_extended_id
+                    and not msg.is_error_frame and not msg.is_remote_frame
+                    and handle_frame(msg.arbitration_id, bytes(msg.data), cfg, state)
+                    and not got_frames):
+                got_frames = True
+                state.set_bus("connected", port)
+                log.info("CAN bağlandı: %s @ %d bit/s (VESC frame'leri geliyor)", port, cfg.bitrate)
+            if probing and not got_frames and time.time() - t_open > PROBE_TIMEOUT_S:
+                log.info("%s: %.0f s içinde VESC frame'i yok — sonraki port deneniyor", port, PROBE_TIMEOUT_S)
+                return False
+    except Exception as exc:  # USB pulled, serial error, open failure, ...
+        log.warning("CAN bus hatası (%s: %s) — yeniden bağlanılacak", port, exc)
+        state.set_bus("reconnecting", port)
+    finally:
+        BUS_HOLDER.set(None)
+        if bus is not None:
+            try:
+                bus.shutdown()
+            except Exception:
+                pass
+    return got_frames
+
+
+def can_reader(cfg: Config, state: TelemetryState, stop: threading.Event) -> None:
     preferred = cfg.port
     while not stop.is_set():
-        port = resolve_port(preferred)
-        if port is None:
+        ports = [cfg.port] if cfg.port else find_ports()
+        if preferred in ports:  # last known-good port first
+            ports.remove(preferred)
+            ports.insert(0, preferred)
+        if not ports:
             state.set_bus("reconnecting", None)
             stop.wait(2.0)
             continue
-        bus = None
-        try:
-            bus = can.Bus(interface="slcan", channel=port, bitrate=cfg.bitrate)
-            preferred = port
-            BUS_HOLDER.set(bus)
-            state.set_bus("connected", port)
-            log.info("CAN bağlandı: %s @ %d bit/s", port, cfg.bitrate)
-            while not stop.is_set():
-                msg = bus.recv(timeout=1.0)
-                if msg is None:
-                    continue
-                if not msg.is_extended_id or msg.is_error_frame or msg.is_remote_frame:
-                    continue
-                handle_frame(msg.arbitration_id, bytes(msg.data), cfg, state)
-        except Exception as exc:  # USB pulled, serial error, open failure, ...
-            log.warning("CAN bus hatası (%s) — yeniden bağlanılacak", exc)
-            state.set_bus("reconnecting", port)
-        finally:
-            BUS_HOLDER.set(None)
-            if bus is not None:
-                try:
-                    bus.shutdown()
-                except Exception:
-                    pass
+        for port in ports:
+            if stop.is_set():
+                break
+            # With a single candidate (or an explicit --port) there is nothing
+            # else to try, so stay on it and let the UI show "no frames".
+            if run_bus(cfg, state, stop, port, probing=len(ports) > 1):
+                preferred = port
+                break
         stop.wait(2.0)
 
 
-def fault_poller(cfg: Config, stop: threading.Event) -> None:
-    """Asks each VESC for its fault code roughly once a second (staggered).
-    Faults are not part of the STATUS broadcasts on any firmware, so this is
-    the only way to see e.g. ABS_OVER_CURRENT or UNDER_VOLTAGE remotely."""
+def fault_poller(cfg: Config, state: TelemetryState, stop: threading.Event) -> None:
+    """Asks each online VESC for its fault code roughly once a second
+    (staggered). Faults are not part of the STATUS broadcasts on any firmware,
+    so this is the only way to see e.g. ABS_OVER_CURRENT remotely. Offline
+    VESCs are skipped: an unacknowledged frame would sit in ArduPilot's CAN
+    TX queue and bump its error counters for nothing."""
     import can
 
     targets = list(cfg.vesc_ids)
@@ -381,10 +444,10 @@ def fault_poller(cfg: Config, stop: threading.Event) -> None:
     while not stop.is_set():
         stop.wait(1.0 / max(len(targets), 1))
         bus = BUS_HOLDER.get()
-        if bus is None:
-            continue
         vid = targets[i % len(targets)]
         i += 1
+        if bus is None or not state.is_online(vid):
+            continue
         arb, data = build_fault_poll_frame(vid, cfg.dash_id)
         try:
             bus.send(can.Message(arbitration_id=arb, data=data, is_extended_id=True))
@@ -398,6 +461,7 @@ def fault_poller(cfg: Config, stop: threading.Event) -> None:
 
 def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) -> None:
     state.set_bus("mock", "mock")
+    cfg.status_rate_hz = 10  # the generator ticks at 10 Hz; keeps fps_expected honest
     t0 = time.time()
     last = t0
     ah = {vid: 0.0 for vid in cfg.vesc_ids}
@@ -461,25 +525,33 @@ def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) ->
 ws_clients: set[WebSocket] = set()
 
 
+async def _send_snapshot(ws: WebSocket, text: str) -> None:
+    try:
+        await asyncio.wait_for(ws.send_text(text), timeout=0.5)
+    except Exception:  # slow or gone — drop it so it cannot stall the others
+        ws_clients.discard(ws)
+
+
 async def broadcaster() -> None:
     prev_frames = STATE.frames_total
     prev_t = time.time()
     fps = 0.0
     while True:
         await asyncio.sleep(0.1)
-        now = time.time()
-        total = STATE.frames_total
-        inst = (total - prev_frames) / max(now - prev_t, 1e-6)
-        prev_frames, prev_t = total, now
-        fps = 0.85 * fps + 0.15 * inst
-        if not ws_clients:
-            continue
-        text = json.dumps(STATE.snapshot(CONFIG.pole_pairs, fps))
-        for ws in list(ws_clients):
-            try:
-                await ws.send_text(text)
-            except Exception:
-                ws_clients.discard(ws)
+        try:
+            now = time.time()
+            total = STATE.frames_total
+            inst = (total - prev_frames) / max(now - prev_t, 1e-6)
+            prev_frames, prev_t = total, now
+            fps = 0.85 * fps + 0.15 * inst
+            if not ws_clients:
+                continue
+            text = json.dumps(STATE.snapshot(CONFIG.pole_pairs, fps, CONFIG.status_rate_hz))
+            await asyncio.gather(*(_send_snapshot(ws, text) for ws in list(ws_clients)))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # never let one bad tick kill the push loop
+            log.exception("broadcaster tick failed")
 
 
 @asynccontextmanager
@@ -489,7 +561,7 @@ async def lifespan(app: FastAPI):
     reader = threading.Thread(target=target, args=(CONFIG, STATE, stop), daemon=True)
     reader.start()
     if not CONFIG.mock and CONFIG.poll_faults:
-        threading.Thread(target=fault_poller, args=(CONFIG, stop), daemon=True).start()
+        threading.Thread(target=fault_poller, args=(CONFIG, STATE, stop), daemon=True).start()
     task = asyncio.create_task(broadcaster())
     yield
     stop.set()
@@ -536,31 +608,37 @@ def parse_args() -> Config:
                    help="fault kodu sorgulamayı kapat (varsayılan: her VESC ~1 Hz sorgulanır)")
     p.add_argument("--dash-id", type=int, default=250,
                    help="dashboard'un VESC CAN protokolündeki controller id'si (varsayılan 250)")
+    p.add_argument("--status-rate-hz", type=int, default=50,
+                   help="VESC Tool'daki CAN Status Rate; beklenen fps ve frame kaybı uyarısı için (varsayılan 50)")
     p.add_argument("--host", default="127.0.0.1", help="HTTP host (varsayılan 127.0.0.1)")
     p.add_argument("--http-port", type=int, default=8000, help="HTTP port (varsayılan 8000)")
     a = p.parse_args()
-    return Config(mock=a.mock, port=a.port, bitrate=a.bitrate,
-                  pole_pairs=a.pole_pairs, host=a.host, http_port=a.http_port,
-                  fw=a.fw, poll_faults=not a.no_poll_faults, dash_id=a.dash_id)
+    cfg = Config(mock=a.mock, port=a.port, bitrate=a.bitrate,
+                 pole_pairs=a.pole_pairs, host=a.host, http_port=a.http_port,
+                 fw=a.fw, poll_faults=not a.no_poll_faults, dash_id=a.dash_id,
+                 status_rate_hz=a.status_rate_hz)
+    errors = cfg.validate()
+    if errors:
+        p.error("; ".join(errors))
+    return cfg
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    global CONFIG
+    global CONFIG, STATE
     CONFIG = parse_args()
+    STATE = TelemetryState(CONFIG.vesc_ids)
 
     if not CONFIG.mock and CONFIG.port is None:
         ports = find_ports()
-        if len(ports) > 1:
-            CONFIG.port = choose_port_interactive(ports)
-        elif len(ports) == 1:
-            CONFIG.port = ports[0]
+        if ports:
+            log.info("SLCAN adayları: %s — VESC frame'i veren port otomatik seçilecek", ", ".join(ports))
         else:
             log.warning("SLCAN portu bulunamadı (%s) — takılınca otomatik bağlanılacak",
                         " | ".join(PORT_GLOBS))
 
     log.info("Dashboard: http://localhost:%d  (%s)", CONFIG.http_port,
-             "mock veri" if CONFIG.mock else f"port={CONFIG.port or 'aranıyor'}")
+             "mock veri" if CONFIG.mock else f"port={CONFIG.port or 'otomatik'}")
     uvicorn.run(app, host=CONFIG.host, port=CONFIG.http_port, log_level="warning")
 
 

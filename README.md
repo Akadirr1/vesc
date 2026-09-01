@@ -23,29 +23,57 @@ python backend/main.py --mock     # donanım yokken sahte veriyle UI geliştirme
 
 Dashboard: http://localhost:8000
 
-Birden fazla `usbmodem` portu varsa başlangıçta CLI'da seçim sorulur. USB
-çekilirse backend otomatik yeniden bağlanmayı dener; durum üst barda görünür.
+Cube Orange USB'de **iki** seri port çıkarır (SERIAL0 = MAVLink, SERIAL6 =
+SLCAN); dashboard adayları sırayla dener ve 3 s içinde VESC frame'i veren
+portu seçer (MAVLink portu SLCAN el sıkışmasını sessizce kabul ettiği için
+"bağlı ama veri yok" tuzağına düşmez). USB çekilirse otomatik yeniden bağlanır;
+durum üst barda görünür. Port açık ama frame gelmiyorsa pill sarı
+"bağlı · frame yok" olur (bkz. SLCAN → armed notu).
 
-Diğer bayraklar: `--port /dev/tty.usbmodemXXXX` (portu elle seç),
+Diğer bayraklar: `--port /dev/cu.usbmodemXXXX` (portu elle seç, probe yok),
 `--bitrate 500000`, `--pole-pairs 7` (RPM = ERPM / pole_pairs),
 `--fw 5.2|6.0` (firmware profili, varsayılan 5.2), `--no-poll-faults`
-(fault sorgulamayı kapat), `--dash-id 250`, `--host`, `--http-port`.
+(fault sorgulamayı kapat), `--dash-id 250`, `--status-rate-hz 50` (VESC
+Tool'daki CAN Status Rate; frame kaybı uyarısı için), `--host`, `--http-port`.
 
-## ArduPilot SLCAN kurulumu (Cube Orange)
+## ArduPilot SLCAN kurulumu (Cube Orange / Orange+)
 
-Mission Planner / QGC ile şu parametreleri ayarlayıp yeniden başlatın:
+Kalıcı ve GCS ile aynı anda çalışan yol: ikinci USB portunu (SERIAL6 = OTG2)
+SLCAN'e ayırmak. Cube Orange/Orange+ hwdef'inde SERIAL6 zaten varsayılan
+olarak SLCAN protokolündedir. Parametreler (ArduPilot kaynağından
+doğrulandı: `AP_CANManager.cpp`, `AP_SLCANIface.cpp`, `hwdef/CubeOrange/hwdef.inc`):
 
 | Parametre | Değer | Açıklama |
 |---|---|---|
 | `CAN_P1_DRIVER` | 1 | Birinci CAN arayüzünü etkinleştir (reboot ister) |
 | `CAN_P1_BITRATE` | 500000 | VESC CAN baud'u ile aynı olmalı |
+| `CAN_D1_PROTOCOL` | 1 (DroneCAN) | **Zorunlu.** Protokol "None" olursa arayüze driver bağlanmaz ve SLCAN'e frame akmaz. `CAN_D1_UC_NODE` 0–3 olmasın (varsayılan 10) |
 | `CAN_SLCAN_CPORT` | 1 | SLCAN'e yönlendirilecek CAN arayüzü (1 = birinci) |
-| `CAN_SLCAN_SERNUM` | 0 | SLCAN'in çalışacağı seri port (0 = SERIAL0 / USB) |
+| `SERIAL6_PROTOCOL` | 22 (SLCAN) | Cube Orange'da fabrika varsayılanı; reboot'a dayanıklı |
 | `CAN_SLCAN_TIMOUT` | 0 | 0 = zaman aşımı yok |
 
-Not: Dashboard'u çalıştırmadan önce GCS'nin (Mission Planner/QGC) o USB
-portuyla bağlantısını kesin — SLCAN akışı ile MAVLink aynı portu paylaşamaz.
-macOS'ta port `/dev/tty.usbmodem*` olarak görünür.
+Bu kurulumda GCS SERIAL0'da (ilk `usbmodem`) bağlı kalabilir; dashboard
+SERIAL6'yı (ikinci `usbmodem`) otomatik bulur.
+
+**`CAN_SLCAN_SERNUM` kullanmayın (kalıcı değil):** bu parametre *geçici*dir —
+ArduPilot her boot'ta `-1`'e sıfırlar (F9P güncellemesinde yaşanan "reboot'ta
+hat eski haline döndü" sorununun sebebi budur).
+
+**Armed uyarısı:** `SERIALn_PROTOCOL=22` ile açılan SLCAN, araç **armed**
+olduğunda ArduPilot tarafından otomatik kapatılır, disarm'da geri açılır
+(`update_slcan_port()`). Cube yalnızca CAN adaptörü olarak kullanılıyorsa
+(hiç arm edilmiyorsa) akış süreklidir. Armed iken de telemetri gerekiyorsa
+tek yol boot sonrası GCS'den `CAN_SLCAN_SERNUM=6` vermektir (bu yolda arming
+kontrolü yoktur; her boot'ta tekrarlanır). Dashboard kesintiyi
+"bağlı · frame yok" olarak gösterir.
+
+**Bant genişliği:** ArduPilot SLCAN her frame'i timestamp'li 31 bayt olarak
+yazar ve seri TX tamponu dolarsa frame'i **sessizce düşürür**. 4 VESC × 5
+status × 50 Hz = 1000 frame/s (31 KB/s). Frame kaybı uyarısı görürseniz VESC
+Tool'da CAN Status Rate'i 20–25 Hz'e çekin ve `--status-rate-hz` ile aynı
+değeri verin.
+
+macOS'ta portlar `/dev/cu.usbmodem*` olarak seçilir (`tty.*` ikizi atlanır).
 
 ## VESC tarafı ayarları (FW 5.2)
 

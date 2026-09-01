@@ -72,6 +72,8 @@
     padding: 1px 8px; border-radius: 999px; white-space: nowrap;
   }
   .badge-fault { background: var(--critical); color: #fff; }
+  .badge-fault.stale { opacity: .55; }  /* no fresh poll reply — value may be outdated */
+  .pill.warn b { color: var(--warning); }
   .card.offline { opacity: .42; filter: grayscale(.65); }
   .card.offline .badge-offline { display: inline-block; }
   .card.fault .badge-fault { display: inline-block; }
@@ -117,7 +119,7 @@
     <span class="spacer"></span>
     <span class="pill" id="pill-bus"><span class="dot"></span><span id="bus-text">bağlanıyor…</span></span>
     <span class="pill"><span>Σ giriş gücü</span><b id="power">—</b></span>
-    <span class="pill"><span>frame</span><b id="fps">—</b><span>fps</span></span>
+    <span class="pill" id="pill-fps"><span>frame</span><b id="fps">—</b><span>fps</span></span>
   </div>
 
   <div class="cards" id="cards"></div>
@@ -143,6 +145,9 @@
 const VESC_IDS = [0, 1, 2, 3];
 const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"];
 const WINDOW_S = 60;
+const NO_FRAMES_AFTER_S = 3;   // serial port open but no VESC frame for this long
+const STALE_FAULT_S = 5;       // must match backend STALE_FAULT_S
+const FPS_LOSS_RATIO = 0.7;    // warn when measured fps < 70 % of expected
 
 const METRICS = {
   rpm:     { key: "rpm",           label: "RPM" },
@@ -173,8 +178,8 @@ for (const vid of VESC_IDS) {
     </div>
     <div class="metrics">
       <div class="metric"><div class="k">Duty</div>       <div class="v" data-f="duty">—</div></div>
-      <div class="metric"><div class="k">Motor akımı</div><div class="v" data-f="current_motor">—</div></div>
-      <div class="metric"><div class="k">Giriş akımı</div><div class="v" data-f="current_in">—</div></div>
+      <div class="metric" title="İşaret güç yönüdür: + motorlama, − rejen (dönüş yönü değil)"><div class="k">Motor akımı</div><div class="v" data-f="current_motor">—</div></div>
+      <div class="metric" title="Batarya akımı (i_bus, firmware'de filtresiz — titreme normaldir); − = rejen"><div class="k">Giriş akımı</div><div class="v" data-f="current_in">—</div></div>
       <div class="metric"><div class="k">Voltaj</div>     <div class="v" data-f="v_in">—</div></div>
       <div class="metric"><div class="k">FET sıcaklığı</div>  <div class="v" data-f="temp_fet">—</div></div>
       <div class="metric"><div class="k">Motor sıcaklığı</div><div class="v" data-f="temp_motor">—</div></div>
@@ -202,8 +207,11 @@ function renderCard(vid, d) {
   card.classList.toggle("offline", !d || !d.online);
   if (!d) return;
   const hasFault = d.fault != null && d.fault !== 0;
+  const staleFault = hasFault && d.fault_age != null && d.fault_age > STALE_FAULT_S;
   card.classList.toggle("fault", hasFault);
-  f.fault.textContent = hasFault ? (d.fault_name || `FAULT ${d.fault}`) : "";
+  f.fault.classList.toggle("stale", staleFault);
+  f.fault.textContent = hasFault ? (d.fault_name || `FAULT ${d.fault}`) + (staleFault ? " ?" : "") : "";
+  f.fault.title = staleFault ? `Son fault yanıtı ${d.fault_age} s önce — güncel olmayabilir` : "";
   f.rpm.textContent = d.rpm == null ? "—" : Math.round(d.rpm).toLocaleString("tr-TR");
   f.erpm.textContent = d.erpm == null ? "" : `ERPM ${Math.round(d.erpm).toLocaleString("tr-TR")}`;
   f.duty.innerHTML = unit(fmt(d.duty == null ? null : d.duty * 100, 1), "%");
@@ -299,29 +307,53 @@ function refreshChart() {
 const pillBus = document.getElementById("pill-bus");
 const busText = document.getElementById("bus-text");
 const powerEl = document.getElementById("power");
+const pillFps = document.getElementById("pill-fps");
 const fpsEl = document.getElementById("fps");
 let lastMsgAt = 0;
 let serverDown = true;
 
 const BUS_LABELS = {
   connected:    ["ok",   (p) => `bağlı · ${p || ""}`],
+  probing:      ["warn", (p) => `port deneniyor · ${p || ""}`],
   mock:         ["ok",   () => "mock veri"],
   reconnecting: ["warn", () => "yeniden bağlanıyor…"],
   starting:     ["warn", () => "başlatılıyor…"],
 };
 
-function setBusPill(cls, text) {
+function setBusPill(cls, text, title = "") {
   pillBus.className = "pill " + cls;
   busText.textContent = text;
+  pillBus.title = title;
+}
+
+function renderBus(bus) {
+  const [cls, label] = BUS_LABELS[bus.status] || ["warn", () => bus.status];
+  // Port open but silent: on ArduPilot this usually means SLCAN was
+  // auto-disabled on arming (SERIALn_PROTOCOL path) or the VESCs are off.
+  if (bus.status === "connected" && (bus.frame_age == null || bus.frame_age > NO_FRAMES_AFTER_S)) {
+    const age = bus.frame_age == null ? "hiç" : `${Math.round(bus.frame_age)} s`;
+    setBusPill("warn", `bağlı · frame yok (${age})`,
+      "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).");
+    return;
+  }
+  setBusPill(cls, label(bus.port));
+}
+
+function renderFps(bus) {
+  fpsEl.textContent = Math.round(bus.fps);
+  const loss = bus.fps_expected > 0 && bus.fps < FPS_LOSS_RATIO * bus.fps_expected;
+  pillFps.className = "pill" + (loss ? " warn" : "");
+  pillFps.title = loss
+    ? `Beklenen ~${bus.fps_expected} fps (online VESC × 5 status × rate). Frame kaybı olabilir: VESC Tool'da CAN Status Rate'i düşürmeyi deneyin (20–25 Hz).`
+    : (bus.fps_expected > 0 ? `Beklenen ~${bus.fps_expected} fps` : "");
 }
 
 function onSnapshot(snap) {
   lastMsgAt = performance.now();
   serverDown = false;
 
-  const [cls, label] = BUS_LABELS[snap.bus.status] || ["warn", () => snap.bus.status];
-  setBusPill(cls, label(snap.bus.port));
-  fpsEl.textContent = Math.round(snap.bus.fps);
+  renderBus(snap.bus);
+  renderFps(snap.bus);
 
   const now = performance.now() / 1000;
   let power = 0, powerKnown = false;
@@ -361,6 +393,7 @@ setInterval(() => {
       for (const vid of VESC_IDS) cardRefs[vid].card.classList.add("offline");
       powerEl.textContent = "—";
       fpsEl.textContent = "—";
+      pillFps.className = "pill";
     }
     setBusPill("err", "sunucu bağlantısı yok");
     refreshChart(); // keeps the window sliding while data is stale

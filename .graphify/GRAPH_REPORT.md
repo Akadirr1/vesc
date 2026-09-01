@@ -1,24 +1,24 @@
 # Graph Report - .  (2026-09-01)
 
 ## Corpus Check
-- Corpus is ~19,606 words - fits in a single context window. You may not need a graph.
+- Corpus is ~23,170 words - fits in a single context window. You may not need a graph.
 
 ## Summary
-- 752 nodes · 1720 edges · 40 communities detected
+- 764 nodes · 1742 edges · 40 communities detected
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS
 - Token cost: 0 input · 0 output
-- Edge kinds: calls: 967 · method: 455 · contains: 280 · rationale_for: 7 · ON_BRANCH: 6 · PARENT_OF: 4 · MODIFIES: 1
+- Edge kinds: calls: 976 · method: 457 · contains: 282 · rationale_for: 14 · ON_BRANCH: 7 · PARENT_OF: 5 · MODIFIES: 1
 
 
 ## Input Scope
 - Requested: auto
 - Resolved: committed (source: default-auto)
-- Included files: 9 · Candidates: 17
-- Excluded: 1 untracked · 24281 ignored · 0 sensitive · 0 missing committed
+- Included files: 10 · Candidates: 18
+- Excluded: 0 untracked · 24282 ignored · 0 sensitive · 0 missing committed
 - Recommendation: Use --scope all or graphify.yaml inputs.corpus for a knowledge-base folder.
 
 ## Graph Freshness
-- Built from Git commit: `40097c9`
+- Built from Git commit: `6574004`
 - Compare this hash to `git rev-parse HEAD` before trusting freshness-sensitive graph output.
 ## God Nodes (most connected - your core abstractions)
 1. `js()` - 72 edges
@@ -59,12 +59,12 @@ Cohesion: 0.06
 Nodes (17): addBox(), afterDraw(), afterUpdate(), b(), ba, f(), gs(), ki() (+9 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.07
-Nodes (14): Bt(), Ft(), Gt(), It(), jt(), kt(), mt(), qt() (+6 more)
+Cohesion: 0.06
+Nodes (40): broadcaster(), build_fault_poll_frame(), BusHolder, can_reader(), choose_port_interactive(), Config, fault_poller(), find_ports() (+32 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.08
-Nodes (31): broadcaster(), build_fault_poll_frame(), BusHolder, can_reader(), choose_port_interactive(), Config, fault_poller(), find_ports() (+23 more)
+Cohesion: 0.07
+Nodes (14): Bt(), Ft(), Gt(), It(), jt(), kt(), mt(), qt() (+6 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.08
@@ -159,20 +159,20 @@ Cohesion: 0.22
 Nodes (1): rs
 
 ### Community 28 - "Community 28"
-Cohesion: 0.25
-Nodes (3): bo, et(), getValueForPixel()
+Cohesion: 0.43
+Nodes (8): claude/graphifyy-claude-setup-msp1t3, main, 0a104b1 Add VESC CAN telemetry dashboard (FastAPI + WebSocket + Chart.js), 0b6ee5f Add graphify knowledge graph artifacts for the dashboard code, 40097c9 Ignore graphify local lifecycle files, 529351d Initial commit, 6574004 Verify CAN parsing against VESC FW 5.02 source; add fault polling, e0c859f Add graphify (@sentropic/graphify) with Claude Code setup and CLAUDE.md
 
 ### Community 29 - "Community 29"
 Cohesion: 0.25
-Nodes (5): buildTicks(), go(), init(), parse(), po()
+Nodes (3): bo, et(), getValueForPixel()
 
 ### Community 30 - "Community 30"
 Cohesion: 0.25
-Nodes (8): draw(), Ee(), getMaxOverflow(), kn(), Le(), qn(), size(), uo()
+Nodes (5): buildTicks(), go(), init(), parse(), po()
 
 ### Community 31 - "Community 31"
-Cohesion: 0.48
-Nodes (7): claude/graphifyy-claude-setup-msp1t3, main, 0a104b1 Add VESC CAN telemetry dashboard (FastAPI + WebSocket + Chart.js), 0b6ee5f Add graphify knowledge graph artifacts for the dashboard code, 40097c9 Ignore graphify local lifecycle files, 529351d Initial commit, e0c859f Add graphify (@sentropic/graphify) with Claude Code setup and CLAUDE.md
+Cohesion: 0.25
+Nodes (8): draw(), Ee(), getMaxOverflow(), kn(), Le(), qn(), size(), uo()
 
 ### Community 32 - "Community 32"
 Cohesion: 0.29
@@ -207,7 +207,7 @@ Cohesion: 0.67
 Nodes (1): ls
 
 ## Knowledge Gaps
-- **7 isolated node(s):** `Latest telemetry per VESC + bus status, shared between the CAN reader     thread`, `(arbitration_id, data) asking `target_vesc_id` for its fault code.      comm_can`, `Pick the serial port for (re)connecting. Called from the reader thread,     so i`, `Shares the live can.Bus between the reader thread (owner) and the     fault poll`, `Asks each VESC for its fault code roughly once a second (staggered).     Faults` (+2 more)
+- **14 isolated node(s):** `Latest telemetry per VESC + bus status, shared between the CAN reader     thread`, `(arbitration_id, data) asking `target_vesc_id` for its fault code.      comm_can`, `Parse one extended frame; returns True if it was an accepted VESC frame.      Th`, `Candidate serial ports, cu.* preferred over its tty.* twin on macOS.     A Cube`, `Shares the live can.Bus between the reader thread (owner) and the     fault poll` (+9 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 10`** (1 nodes): `ns()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -231,14 +231,14 @@ Nodes (1): ls
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `js()` connect `Community 1` to `Community 7`, `Community 11`, `Community 2`, `Community 26`, `Community 35`, `Community 28`, `Community 29`, `Community 17`, `Community 20`, `Community 24`, `Community 21`, `Community 13`, `Community 23`?**
-  _High betweenness centrality (0.116) - this node is a cross-community bridge._
-- **Why does `ns()` connect `Community 10` to `Community 7`, `Community 19`, `Community 20`, `Community 5`, `Community 6`, `Community 35`, `Community 32`, `Community 25`, `Community 39`, `Community 33`, `Community 29`, `Community 17`, `Community 0`, `Community 14`?**
-  _High betweenness centrality (0.093) - this node is a cross-community bridge._
+- **Why does `js()` connect `Community 1` to `Community 7`, `Community 11`, `Community 2`, `Community 26`, `Community 35`, `Community 29`, `Community 30`, `Community 17`, `Community 20`, `Community 24`, `Community 21`, `Community 13`, `Community 23`?**
+  _High betweenness centrality (0.112) - this node is a cross-community bridge._
+- **Why does `ns()` connect `Community 10` to `Community 7`, `Community 19`, `Community 20`, `Community 5`, `Community 6`, `Community 35`, `Community 32`, `Community 25`, `Community 39`, `Community 33`, `Community 30`, `Community 17`, `Community 0`, `Community 14`?**
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
 - **Why does `an()` connect `Community 0` to `Community 7`, `Community 23`, `Community 5`, `Community 1`, `Community 35`, `Community 13`, `Community 17`, `Community 12`, `Community 10`, `Community 15`?**
-  _High betweenness centrality (0.088) - this node is a cross-community bridge._
-- **What connects `Latest telemetry per VESC + bus status, shared between the CAN reader     thread`, `(arbitration_id, data) asking `target_vesc_id` for its fault code.      comm_can`, `Pick the serial port for (re)connecting. Called from the reader thread,     so i` to the rest of the system?**
-  _7 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **What connects `Latest telemetry per VESC + bus status, shared between the CAN reader     thread`, `(arbitration_id, data) asking `target_vesc_id` for its fault code.      comm_can`, `Parse one extended frame; returns True if it was an accepted VESC frame.      Th` to the rest of the system?**
+  _14 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.06018018018018018 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**

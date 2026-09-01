@@ -235,3 +235,40 @@ mask'la alınabilir.
 | Ah / Wh | S2 / S3 | ✓ |
 | Fault rozeti | GET_VALUES_SELECTIVE bit 15 poll | ✓ |
 | Σ giriş gücü | S5.v_in × S4.current_in toplamı | ✓ (türetilmiş) |
+
+### İşaret ve filtre semantiği (mcpwm_foc.c 5.02)
+
+- **Motor akımı (S1)** = `SIGN(vq · iq_filter) · i_abs_filter` (:1169). İşaret
+  **güç yönü**dür: + motorlama, − rejeneratif fren. Dönüş yönünü **vermez**;
+  ters itki de + okunur. Yön için ERPM'nin işaretine bakın.
+- **Giriş akımı (S4)** = `i_bus`, adına rağmen **filtresizdir** (:1275 "TODO:
+  Calculate filtered current?"). 10 Hz örneklemede titremesi normaldir; − = bataryaya şarj.
+- **Ah/Wh (S2/S3)** VESC açılışından itibaren sayaçtır; VESC güç çevriminde sıfırlanır.
+
+### FW 5.03 ile fark
+
+`release_5_03` ile diff alındı: `CAN_PACKET_ID` ilk 46 girişi ve STATUS 1–5
+gönderim kodu aynıdır (yalnız S5 voltajı `mc_interface_get_input_voltage_filtered()`
+olur, ölçek aynı). Bu doküman 5.02 ve 5.03 için geçerlidir.
+
+## 8. SLCAN / ArduPilot katmanı (kaynak: ArduPilot master)
+
+Dashboard'un parser'ı doğru olsa da veri ArduPilot'tan geçer; şu davranışlar
+doğrulandı ve koda yansıtıldı:
+
+| Bulgu | Kaynak | Dashboard'daki karşılığı |
+|---|---|---|
+| Firmware `cmd = eid >> 8`'in tamamını karşılaştırır (21 bit), `&0xFF` yapmaz | bldc `comm_can.c:1141` | Parser da maskesiz karşılaştırır; bits 16–28 dolu frame'ler (DroneCAN) yok sayılır. Aynı sebeple DroneCAN frame'leri VESC'lere komut olamaz |
+| SLCAN passthrough için arayüze bir protokol driver'ı bağlı olmalı; `CAN_D1_PROTOCOL=None` → `default: continue` → `receive()` hiç çağrılmaz | `AP_CANManager.cpp` init | README: `CAN_D1_PROTOCOL=1` zorunlu |
+| `CAN_SLCAN_SERNUM` her boot'ta −1'e sıfırlanır (`reset_params()`); kalıcı yol `SERIALn_PROTOCOL=22` | `AP_SLCANIface.cpp` params + `update_slcan_port()` | README: SERIAL6_PROTOCOL=22 |
+| Cube Orange/Orange+: `SERIAL_ORDER OTG1 … OTG2` → SERIAL6 = ikinci USB; `HAL_OTG2_PROTOCOL SerialProtocol_SLCAN` | `hwdef/CubeOrange/hwdef.inc:32,35` | Port probe: iki `usbmodem`'den frame vereni seç |
+| SERIALn yoluyla açılan SLCAN **armed** olunca kapanır, disarm'da açılır; SERNUM yolunda arming kontrolü yok | `update_slcan_port()` | UI "bağlı · frame yok" uyarısı + README notu |
+| Her frame'e koşulsuz 4 hex timestamp eklenir (`T`+id8+dlc+data+ts4+`\r` = 31 bayt); `txspace` yetmezse `reportFrame` 0 döner → **sessiz frame kaybı** | `reportFrame()` | `--status-rate-hz` ile beklenen fps; %70 altı sarı uyarı; README 20–25 Hz önerisi |
+| `S`/`O`/`C`/`Z` komutları sadece "OK" döner; frame akışı `O`'ya bağlı değildir; TX'e `Z\r` ack'ı yazılır | `AP_SLCANIface.cpp:350–360, 329` | python-can bu satırları yok sayar; bağlanınca `flush()` |
+| Hex çıktısı büyük harf; satır ortasından açılınca `D`/`B` ile başlayan fragment python-can'in CAN-FD dallarında `IndexError/ValueError` fırlatır (`slcan.py:298–322`, try yok) | `nibble2hex`, python-can 4.6.1 | `recv` etrafında `(ValueError, IndexError, KeyError)` → satır atlanır; yalnız seri/CAN hataları reconnect tetikler |
+| python-can `sleep_after_open` varsayılanı 2 s (Arduino adaptörleri için) | `slcan.py:150` | 0.3 s |
+
+Poll istekleri ArduPilot'ta `push_Frame → rx_queue_` ile CAN'e aktarılır; TX
+mailbox'ı 8 denemede boşalmazsa frame düşer (`receive()` kuyruğu). Bu yüzden
+yalnız **online** VESC'ler sorgulanır — ACK'lenmeyecek frame ArduPilot'un hata
+sayaçlarını boşuna artırır.
