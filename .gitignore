@@ -1,0 +1,7 @@
+node_modules/
+
+# graphify local state (never commit these)
+.graphify/cache/
+.graphify/branch.json
+.graphify/worktree.json
+.graphify/needs_update

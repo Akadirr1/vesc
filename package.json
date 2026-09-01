@@ -1,0 +1,12 @@
+{
+  "name": "vesc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "vesc project",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@sentropic/graphify": "^0.17.1"
+  }
+}
