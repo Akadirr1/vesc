@@ -1,0 +1,34 @@
+{
+  ".claude/CLAUDE.md": {
+    "mtime": 1788278581496.4854,
+    "hash": "db73b0edd7ffbc61ceac177130730865"
+  },
+  ".claude/skills/graphify/SKILL.md": {
+    "mtime": 1788278625650.9905,
+    "hash": "c1571f7a7f451058f7ef8173f62d2063"
+  },
+  "CLAUDE.md": {
+    "mtime": 1788279511648.206,
+    "hash": "75b9f3a3f0841078b731e7195a01eb1d"
+  },
+  "README.md": {
+    "mtime": 1788279501344.2056,
+    "hash": "00994665a7ffd363ac11dc4b1c9307e8"
+  },
+  "backend/main.py": {
+    "mtime": 1788279404668.1997,
+    "hash": "cbaad1b479ca198b4bf6e7217db72ccc"
+  },
+  "backend/static/chart.umd.min.js": {
+    "mtime": 1788279239948.19,
+    "hash": "3a1612b2a2ed332a6c1793fc73fa564a"
+  },
+  "backend/static/index.html": {
+    "mtime": 1788279599452.2114,
+    "hash": "ac05c43f6c45995f35e90e0ac8af65ef"
+  },
+  "requirements.txt": {
+    "mtime": 1788279481448.2043,
+    "hash": "828e490a93637b16131fe4061602f817"
+  }
+}
