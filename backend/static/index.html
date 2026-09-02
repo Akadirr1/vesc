@@ -148,6 +148,11 @@ const WINDOW_S = 60;
 const NO_FRAMES_AFTER_S = 3;   // serial port open but no VESC frame for this long
 const STALE_FAULT_S = 5;       // must match backend STALE_FAULT_S
 const FPS_LOSS_RATIO = 0.7;    // warn when measured fps < 70 % of expected
+// The sensorless FOC observer jitters a few ERPM at standstill (VESC Tool
+// shows the same). Clamp tiny RPM to 0 and keep a minimum y-span so the
+// chart never auto-zooms into that noise.
+const RPM_DEADBAND = 5;                                    // mechanical RPM
+const MIN_SPAN = { rpm: 200, current: 4, temp: 10, voltage: 2 };
 
 const METRICS = {
   rpm:     { key: "rpm",           label: "RPM" },
@@ -212,7 +217,8 @@ function renderCard(vid, d) {
   f.fault.classList.toggle("stale", staleFault);
   f.fault.textContent = hasFault ? (d.fault_name || `FAULT ${d.fault}`) + (staleFault ? " ?" : "") : "";
   f.fault.title = staleFault ? `Son fault yanıtı ${d.fault_age} s önce — güncel olmayabilir` : "";
-  f.rpm.textContent = d.rpm == null ? "—" : Math.round(d.rpm).toLocaleString("tr-TR");
+  const rpm = d.rpm == null ? null : (Math.abs(d.rpm) < RPM_DEADBAND ? 0 : d.rpm);
+  f.rpm.textContent = rpm == null ? "—" : (Math.round(rpm) || 0).toLocaleString("tr-TR");
   f.erpm.textContent = d.erpm == null ? "" : `ERPM ${Math.round(d.erpm).toLocaleString("tr-TR")}`;
   f.duty.innerHTML = unit(fmt(d.duty == null ? null : d.duty * 100, 1), "%");
   f.current_motor.innerHTML = unit(fmt(d.current_motor), "A");
@@ -299,6 +305,13 @@ function refreshChart() {
   chart.data.datasets.forEach((ds, i) => {
     ds.data = history[activeMetric][VESC_IDS[i]].map((p) => ({ x: p.t - now, y: p.v }));
   });
+  // Minimum y-span: autoscale only once the data actually moves more than this.
+  let lo = Infinity, hi = -Infinity;
+  for (const ds of chart.data.datasets) for (const p of ds.data) { if (p.y < lo) lo = p.y; if (p.y > hi) hi = p.y; }
+  const span = MIN_SPAN[activeMetric];
+  const y = chart.options.scales.y;
+  if (isFinite(lo) && hi - lo < span) { const mid = (lo + hi) / 2; y.min = mid - span / 2; y.max = mid + span / 2; }
+  else { delete y.min; delete y.max; }
   chart.update("none");
 }
 
@@ -363,7 +376,8 @@ function onSnapshot(snap) {
     if (d && d.online) {
       if (d.v_in != null && d.current_in != null) { power += d.v_in * d.current_in; powerKnown = true; }
       for (const [m, def] of Object.entries(METRICS)) {
-        const v = d[def.key];
+        let v = d[def.key];
+        if (m === "rpm" && v != null && Math.abs(v) < RPM_DEADBAND) v = 0;
         if (v != null) {
           const buf = history[m][vid];
           buf.push({ t: now, v });
