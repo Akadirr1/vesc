@@ -154,8 +154,14 @@ def open_connection(spec: str, sysid: int, compid: int):
         head, _, tail = spec.rpartition(":")
         if head and tail.isdigit():
             device, baud = head, int(tail)
-    return mavutil.mavlink_connection(device, baud=baud, source_system=sysid,
+    conn = mavutil.mavlink_connection(device, baud=baud, source_system=sysid,
                                       source_component=compid, dialect="ardupilotmega")
+    # Bounded serial writes: a wedged USB CDC port must raise (-> reconnect)
+    # instead of blocking forever inside a lock. UDP writes never block.
+    port = getattr(conn, "port", None)
+    if port is not None and hasattr(port, "write_timeout"):
+        port.write_timeout = 0.5
+    return conn
 
 
 class MavlinkUplink(threading.Thread):
@@ -176,7 +182,9 @@ class MavlinkUplink(threading.Thread):
             return open_connection(self.cfg.mavlink_out, self.cfg.mav_sysid, self.cfg.mav_compid), threading.Lock(), True
         bus = self.shared()
         conn = getattr(bus, "conn", None)
-        if conn is None:
+        # Only ride a transport that is really delivering CAN frames: while
+        # probing, BUS_HOLDER may point at the wrong (SLCAN) port.
+        if conn is None or getattr(bus, "frames_rx", 0) == 0:
             return None, None, False
         return conn, bus.lock, False
 

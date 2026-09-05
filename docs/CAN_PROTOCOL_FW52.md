@@ -351,3 +351,4 @@ target_component, bus, len, id, data[8])`, `data` **tam 8 eleman** ister; alına
 Referans istemci (mavcan.py): sysid 250 / compid 189, komutu **1 s'de bir** yeniler,
 `is_extended = id & (1<<31)`, `canid = id & 0x1FFFFFFF`, `data[:len]`, TX'te
 `bus` 0-tabanlı, `id |= 1<<31`, 8 bayta doldurma — dashboard aynı kuralları uygular.
+| Otopilot, kendi sysid **ve** compid'i ile gelen paketleri loopback sayıp atar; broadcast (target 0/0) paketler yerel işlenir ama öğrenilen tüm rotalara (radyo dahil) kopyalanır | `MAVLink_routing.cpp:101-106`, `:225-240` | `--mav-compid 1` reddedilir; hedef ilk mesajdan öğrenilir (`MavlinkCanBus.target`), sonra komut/TX o adrese gider |

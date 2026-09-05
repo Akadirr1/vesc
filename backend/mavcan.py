@@ -40,6 +40,8 @@ FLAG_EFF = 0x80000000      # AP_HAL::CANFrame::FlagEFF
 MASK_EXT_ID = 0x1FFFFFFF   # AP_HAL::CANFrame::MaskExtID
 FORWARD_PERIOD_S = 1.0     # ArduPilot expires forwarding after 5 s; mavcan uses 1 s
 MAV_RESULT_ACCEPTED = 0
+REJECT_LOG_EVERY_S = 60.0  # probing recreates the bus every few seconds; do not spam
+_last_reject_log = 0.0
 
 
 class MavlinkCanBus:
@@ -61,19 +63,27 @@ class MavlinkCanBus:
         self.bus_index = bus_index
         self.period = forward_period
         self._last_enable = 0.0
-        self._rejected_logged = False
         self.frames_rx = 0
         self.acks = 0
+        # Autopilot address, learned from the first message it sends us. Until
+        # then 0/0 (processed locally, but ArduPilot also forwards broadcasts to
+        # every other link — e.g. the telemetry radio — so we stop using it asap).
+        self.target = (0, 0)
+        self.note = None  # human-readable transport problem for the UI, or None
 
     def _keepalive(self, now: float) -> None:
         if now - self._last_enable < self.period:
             return
-        # target_system 0 / target_component 0: processed locally by the
-        # autopilot (MAVLink_routing.cpp) — no need to learn its sysid first.
+        # Before the autopilot's address is learned this goes out as 0/0, which
+        # ArduPilot processes locally (MAVLink_routing.cpp) but also forwards.
         with self.lock:
-            self.conn.mav.command_long_send(0, 0, MAV_CMD_CAN_FORWARD, 0,
+            self.conn.mav.command_long_send(*self.target, MAV_CMD_CAN_FORWARD, 0,
                                             float(self.bus_index), 0, 0, 0, 0, 0, 0)
         self._last_enable = now
+
+    def _learn_target(self, msg) -> None:
+        if self.target == (0, 0):
+            self.target = (msg.get_srcSystem(), msg.get_srcComponent())
 
     def recv(self, timeout: float = 0.5):
         """Next CAN frame as a can.Message, or None on timeout / non-frame traffic."""
@@ -83,13 +93,21 @@ class MavlinkCanBus:
         if msg is None:
             return None
         mtype = msg.get_type()
+        if mtype != "COMMAND_ACK" or msg.command == MAV_CMD_CAN_FORWARD:
+            self._learn_target(msg)  # only from the autopilot's own CAN traffic / our ack
         if mtype == "COMMAND_ACK":
             if msg.command == MAV_CMD_CAN_FORWARD:
                 self.acks += 1
-                if msg.result != MAV_RESULT_ACCEPTED and not self._rejected_logged:
-                    self._rejected_logged = True
-                    log.warning("ArduPilot MAV_CMD_CAN_FORWARD isteğini reddetti (result=%d): "
-                                "CAN_P%d_DRIVER=1 ve reboot yapıldı mı?", msg.result, self.bus_index)
+                if msg.result == MAV_RESULT_ACCEPTED:
+                    self.note = None
+                else:
+                    self.note = (f"MAV_CMD_CAN_FORWARD reddedildi (result={msg.result}) — "
+                                 f"CAN_P{self.bus_index}_DRIVER=1 ve reboot?")
+                    global _last_reject_log
+                    now = time.time()
+                    if now - _last_reject_log > REJECT_LOG_EVERY_S:
+                        _last_reject_log = now
+                        log.warning("ArduPilot %s", self.note)
             return None
         raw = int(msg.id)
         length = min(int(msg.len), len(msg.data))
@@ -108,12 +126,12 @@ class MavlinkCanBus:
         can_id = msg.arbitration_id | (FLAG_EFF if msg.is_extended_id else 0)
         padded = data[:8].ljust(8, b"\0")
         with self.lock:
-            self.conn.mav.can_frame_send(0, 0, self.bus_index - 1, len(data[:8]), can_id, list(padded))
+            self.conn.mav.can_frame_send(*self.target, self.bus_index - 1, len(data[:8]), can_id, list(padded))
 
     def shutdown(self) -> None:
         try:
             with self.lock:  # param1 = 0: stop forwarding (best effort)
-                self.conn.mav.command_long_send(0, 0, MAV_CMD_CAN_FORWARD, 0, 0, 0, 0, 0, 0, 0, 0)
+                self.conn.mav.command_long_send(*self.target, MAV_CMD_CAN_FORWARD, 0, 0, 0, 0, 0, 0, 0, 0)
         except Exception:
             pass
         try:

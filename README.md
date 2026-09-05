@@ -64,9 +64,9 @@ hat eski haline döndü" sorununun sebebi budur).
 olduğunda ArduPilot tarafından otomatik kapatılır, disarm'da geri açılır
 (`update_slcan_port()`). Cube yalnızca CAN adaptörü olarak kullanılıyorsa
 (hiç arm edilmiyorsa) akış süreklidir. Armed iken de telemetri gerekiyorsa
-tek yol boot sonrası GCS'den `CAN_SLCAN_SERNUM=6` vermektir (bu yolda arming
-kontrolü yoktur; her boot'ta tekrarlanır). Dashboard kesintiyi
-"bağlı · frame yok" olarak gösterir.
+aşağıdaki **MAVLink CAN forwarding** bölümüne bak (kalıcı, arming kontrolü
+yok); geçici alternatif boot sonrası GCS'den `CAN_SLCAN_SERNUM=6`. Dashboard
+kesintiyi "bağlı · frame yok" olarak gösterir.
 
 **Bant genişliği:** ArduPilot SLCAN her frame'i timestamp'li 31 bayt olarak
 yazar ve seri TX tamponu dolarsa frame'i **sessizce düşürür**. 4 VESC × 5
@@ -107,6 +107,9 @@ Bilinmesi gerekenler:
   çıkarmamalı; fps uyarısı görürsen VESC status rate'i 20–25 Hz'e çek.
 - **Fault poll** aynı kanaldan çalışır (dashboard `CAN_FRAME` göndererek bus'a
   yazar). Cube'un kendi DroneCAN frame'leri de akışta gelir; parser yok sayar.
+- **Adresleme:** dashboard otopilotun sysid/compid'ini ilk mesajdan öğrenir ve
+  komutları ona hedefler (broadcast olsa ArduPilot radyoya da kopyalardı).
+  `--mav-compid` 1 olamaz (otopilotun kendi id'si; loopback sayılıp atılır).
 - **Telemetri uplink aynı bağlantıdan:** `--mavlink-out same` eklersen
   `ESC_TELEMETRY_1_TO_4` + `TUNNEL` aynı porttan otopilota yazılır ve ArduPilot
   bunları radyoya (TELEM1) iletir → karada `--mavlink-in` ile aynı arayüz.

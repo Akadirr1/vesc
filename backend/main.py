@@ -97,6 +97,10 @@ class Config:
             errors.append("--mav-can-bus 1-3 aralığında olmalı (CAN1 = 1)")
         if self.mavlink_out == "same" and self.can_interface != "mavlink":
             errors.append("--mavlink-out same yalnız --can-interface mavlink ile kullanılabilir")
+        if self.mavlink_out == "same" and self.mock:
+            errors.append("--mavlink-out same --mock ile kullanılamaz (paylaşılacak CAN bağlantısı yok)")
+        if self.mav_compid == 1:
+            errors.append("--mav-compid 1 otopilotun kendi id'si — ArduPilot paketleri loopback sayıp atar; 191 kullanın")
         if self.uplink_rate <= 0:
             errors.append("--uplink-rate pozitif olmalı")
         if self.mavlink_in and (self.mock or self.mavlink_out):
@@ -132,6 +136,7 @@ class TelemetryState:
         # VESC status frames seen from ids that are NOT in vesc_ids (misconfigured --vesc-ids)
         self.unknown_ids: dict[int, int] = {}
         self.transport = "slcan"  # slcan | socketcan | mavlink | mock | mavlink-in (for the UI label)
+        self.bus_note: str | None = None  # transport-specific problem text (e.g. CAN_FORWARD rejected)
         self.bus_status = "starting"  # starting | probing | connected | reconnecting | mock
         self.bus_port: str | None = None
 
@@ -154,6 +159,10 @@ class TelemetryState:
         with self._lock:
             self.bus_status = status
             self.bus_port = port
+
+    def set_note(self, note: str | None) -> None:
+        with self._lock:
+            self.bus_note = note
 
     def is_online(self, vesc_id: int) -> bool:
         with self._lock:
@@ -199,6 +208,7 @@ class TelemetryState:
                     "frame_age": round(frame_age, 1) if frame_age is not None else None,
                     "unknown_ids": sorted(self.unknown_ids),
                     "transport": self.transport,
+                    "note": self.bus_note,
                 },
                 "vesc_ids": list(self.vescs.keys()),
                 "pole_pairs": pole_pairs,
@@ -435,11 +445,16 @@ def run_bus(cfg: Config, state: TelemetryState, stop: threading.Event,
         BUS_HOLDER.set(bus)
         state.set_bus("probing" if probing else "connected", port)
         t_open = time.time()
+        last_note = None
         while not stop.is_set():
             try:
                 msg = bus.recv(timeout=0.5)
             except (ValueError, IndexError, KeyError):
                 continue  # corrupted/partial SLCAN line — not a bus failure
+            note = getattr(bus, "note", None)  # mavlink transport: CAN_FORWARD rejected etc.
+            if note != last_note:
+                state.set_note(note)
+                last_note = note
             if (msg is not None and msg.is_extended_id
                     and not msg.is_error_frame and not msg.is_remote_frame
                     and handle_frame(msg.arbitration_id, bytes(msg.data), cfg, state)
@@ -461,6 +476,7 @@ def run_bus(cfg: Config, state: TelemetryState, stop: threading.Event,
         state.set_bus("reconnecting", port)
     finally:
         BUS_HOLDER.set(None)
+        state.set_note(None)
         if bus is not None:
             try:
                 bus.shutdown()
@@ -670,7 +686,8 @@ def parse_args() -> Config:
     p = argparse.ArgumentParser(description="VESC CAN telemetry dashboard")
     p.add_argument("--mock", action="store_true",
                    help="gerçek CAN yerine 4 VESC için sahte veri üret")
-    p.add_argument("--port", help="SLCAN seri portu (varsayılan: otomatik bul)")
+    p.add_argument("--port", help="slcan: seri port; mavlink: pymavlink bağlantısı (/dev/cu.usbmodemXXXX[:baud], "
+                                  "udpin:host:port, udpout:host:port). Varsayılan: usbmodem/ttyACM portlarını sırayla dene")
     p.add_argument("--bitrate", type=int, default=500_000, help="CAN bitrate (varsayılan 500000)")
     p.add_argument("--vesc-ids", default="21,22,23,24",
                    help="bus'taki VESC id'leri, virgülle (varsayılan 21,22,23,24)")
