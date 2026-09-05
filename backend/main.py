@@ -62,7 +62,7 @@ class Config:
     port: str | None = None
     bitrate: int = 500_000
     pole_pairs: int = 7
-    vesc_ids: tuple[int, ...] = (0, 1, 2, 3)
+    vesc_ids: tuple[int, ...] = (21, 22, 23, 24)  # the ESC ids on this bus (--vesc-ids)
     host: str = "127.0.0.1"
     http_port: int = 8000
     fw: str = "5.2"          # "5.2" or "6.0" — selects which status frames exist
@@ -97,6 +97,9 @@ class Config:
             errors.append("--mavlink-in (kara modu) --mock veya --mavlink-out ile birlikte kullanılamaz")
         if not 1 <= self.mav_sysid <= 255 or not 1 <= self.mav_compid <= 255:
             errors.append("--mav-sysid/--mav-compid 1-255 aralığında olmalı")
+        if not self.vesc_ids or len(set(self.vesc_ids)) != len(self.vesc_ids) \
+                or any(not 0 <= v <= 254 for v in self.vesc_ids):
+            errors.append("--vesc-ids: 0-254 arası, tekrarsız, virgülle ayrılmış id listesi olmalı")
         if not 0 <= self.dash_id <= 254:
             errors.append("--dash-id 0-254 aralığında olmalı (255 = VESC broadcast)")
         elif self.dash_id in self.vesc_ids:
@@ -120,6 +123,8 @@ class TelemetryState:
         self.frames_per_tick = frames_per_tick  # frames one VESC produces per status tick
         self.frames_total = 0
         self.last_frame_t: float | None = None  # last accepted VESC frame (any id)
+        # VESC status frames seen from ids that are NOT in vesc_ids (misconfigured --vesc-ids)
+        self.unknown_ids: dict[int, int] = {}
         self.bus_status = "starting"  # starting | probing | connected | reconnecting | mock
         self.bus_port: str | None = None
 
@@ -133,6 +138,10 @@ class TelemetryState:
                 d["fault_seen"] = now
             self.frames_total += frames
             self.last_frame_t = now
+
+    def note_unknown(self, vesc_id: int) -> None:
+        with self._lock:
+            self.unknown_ids[vesc_id] = self.unknown_ids.get(vesc_id, 0) + 1
 
     def set_bus(self, status: str, port: str | None) -> None:
         with self._lock:
@@ -181,7 +190,9 @@ class TelemetryState:
                     # expected CAN frame rate for the VESCs currently online
                     "fps_expected": round(n_online * self.frames_per_tick * status_rate_hz, 1),
                     "frame_age": round(frame_age, 1) if frame_age is not None else None,
+                    "unknown_ids": sorted(self.unknown_ids),
                 },
+                "vesc_ids": list(self.vescs.keys()),
                 "pole_pairs": pole_pairs,
                 "vescs": vescs,
             }
@@ -328,6 +339,8 @@ def handle_frame(arbitration_id: int, data: bytes, cfg: Config, state: Telemetry
         return False
 
     if vesc_id not in cfg.vesc_ids:
+        if command_id in cfg.parsers:  # a real VESC status frame from an id we were not told about
+            state.note_unknown(vesc_id)
         return False
     entry = cfg.parsers.get(command_id)
     if entry is None:
@@ -422,7 +435,13 @@ def run_bus(cfg: Config, state: TelemetryState, stop: threading.Event,
                 state.set_bus("connected", port)
                 log.info("CAN bağlandı: %s @ %d bit/s (VESC frame'leri geliyor)", port, cfg.bitrate)
             if probing and not got_frames and time.time() - t_open > PROBE_TIMEOUT_S:
-                log.info("%s: %.0f s içinde VESC frame'i yok — sonraki port deneniyor", port, PROBE_TIMEOUT_S)
+                unk = sorted(state.unknown_ids)
+                if unk:
+                    log.warning("%s: hatta VESC status frame'leri var ama id'ler listede yok: %s — "
+                                "--vesc-ids %s ile başlatın (şu an: %s)", port, unk,
+                                ",".join(map(str, unk)), ",".join(map(str, cfg.vesc_ids)))
+                else:
+                    log.info("%s: %.0f s içinde VESC frame'i yok — sonraki port deneniyor", port, PROBE_TIMEOUT_S)
                 return False
     except Exception as exc:  # USB pulled, serial error, open failure, ...
         log.warning("CAN bus hatası (%s: %s) — yeniden bağlanılacak", port, exc)
@@ -502,21 +521,21 @@ def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) ->
     tacho = {vid: 0.0 for vid in cfg.vesc_ids}
     # Per-VESC temperature profiles so all three color bands show up:
     # (base °C, swing °C) — VESC 3 deliberately peaks above 80.
-    temp_profile = {0: (48, 6), 1: (60, 9), 2: (54, 8), 3: (72, 16)}
+    temp_profiles = [(48, 6), (60, 9), (54, 8), (72, 16)]  # by position, not by id
 
     while not stop.is_set():
         now = time.time()
         dt, last = now - last, now
         t = now - t0
-        for vid in cfg.vesc_ids:
-            ph = vid * 1.7
+        for i, vid in enumerate(cfg.vesc_ids):
+            ph = i * 1.7
             rpm = 2600 + 1800 * math.sin(t / 6 + ph) + random.uniform(-40, 40)
             erpm = rpm * cfg.pole_pairs
             duty = max(-0.95, min(0.95, rpm / 5200 + 0.02 * math.sin(t / 2 + ph)))
             i_mot = 12 + 9 * math.sin(t / 3.5 + ph * 2) + random.uniform(-0.8, 0.8)
             i_in = abs(i_mot * duty) + random.uniform(0.0, 0.3)
             v_in = 39.5 - 0.06 * i_in - 0.4 * math.sin(t / 40) + random.uniform(-0.05, 0.05)
-            base, swing = temp_profile[vid]
+            base, swing = temp_profiles[i % len(temp_profiles)]
             temp_fet = base + swing * math.sin(t / 25 + ph) + random.uniform(-0.3, 0.3)
             ah[vid] += i_in * dt / 3600.0
             wh[vid] += v_in * i_in * dt / 3600.0
@@ -534,11 +553,11 @@ def mock_generator(cfg: Config, state: TelemetryState, stop: threading.Event) ->
                 "temp_fet": temp_fet,
                 "temp_motor": -100.0,
                 "current_in": i_in,
-                "pid_pos": (t * 10 + vid * 90) % 360,
+                "pid_pos": (t * 10 + i * 90) % 360,
                 "tacho": int(tacho[vid]),
                 "v_in": v_in,
                 # VESC 1 raises ABS_OVER_CURRENT for 6 s out of every 40 s.
-                "fault": 4 if (vid == 1 and t % 40 < 6) else 0,
+                "fault": 4 if (i == 1 and t % 40 < 6) else 0,
             }
             if cfg.fw.startswith("6"):  # STATUS_6 exists only on FW 6.00+
                 fields.update({
@@ -639,6 +658,8 @@ def parse_args() -> Config:
                    help="gerçek CAN yerine 4 VESC için sahte veri üret")
     p.add_argument("--port", help="SLCAN seri portu (varsayılan: otomatik bul)")
     p.add_argument("--bitrate", type=int, default=500_000, help="CAN bitrate (varsayılan 500000)")
+    p.add_argument("--vesc-ids", default="21,22,23,24",
+                   help="bus'taki VESC id'leri, virgülle (varsayılan 21,22,23,24)")
     p.add_argument("--pole-pairs", type=int, default=7,
                    help="motor kutup çifti sayısı, RPM = ERPM / pole_pairs (varsayılan 7)")
     p.add_argument("--fw", choices=("5.2", "6.0"), default="5.2",
@@ -667,8 +688,12 @@ def parse_args() -> Config:
     p.add_argument("--host", default="127.0.0.1", help="HTTP host (varsayılan 127.0.0.1)")
     p.add_argument("--http-port", type=int, default=8000, help="HTTP port (varsayılan 8000)")
     a = p.parse_args()
+    try:
+        vesc_ids = tuple(int(x) for x in a.vesc_ids.split(",") if x.strip())
+    except ValueError:
+        p.error("--vesc-ids sayı listesi olmalı, örn. 21,22,23,24")
     offline = a.offline_after if a.offline_after is not None else (5.0 if a.mavlink_in else OFFLINE_AFTER_S)
-    cfg = Config(mock=a.mock, port=a.port, bitrate=a.bitrate,
+    cfg = Config(mock=a.mock, port=a.port, bitrate=a.bitrate, vesc_ids=vesc_ids,
                  pole_pairs=a.pole_pairs, host=a.host, http_port=a.http_port,
                  fw=a.fw, poll_faults=not a.no_poll_faults, dash_id=a.dash_id,
                  status_rate_hz=a.status_rate_hz, can_interface=a.can_interface,
@@ -707,6 +732,7 @@ def main() -> None:
         if CONFIG.mavlink_out:
             source += f" → MAVLink {CONFIG.mavlink_out} @ {CONFIG.uplink_rate:g} Hz"
 
+    log.info("VESC id'leri: %s (pole_pairs=%d)", ",".join(map(str, CONFIG.vesc_ids)), CONFIG.pole_pairs)
     log.info("Dashboard: http://localhost:%d  (%s)", CONFIG.http_port, source)
     uvicorn.run(app, host=CONFIG.host, port=CONFIG.http_port, log_level="warning")
 

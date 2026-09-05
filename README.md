@@ -31,7 +31,8 @@ durum üst barda görünür. Port açık ama frame gelmiyorsa pill sarı
 "bağlı · frame yok" olur (bkz. SLCAN → armed notu).
 
 Diğer bayraklar: `--port /dev/cu.usbmodemXXXX` (portu elle seç, probe yok),
-`--bitrate 500000`, `--pole-pairs 7` (RPM = ERPM / pole_pairs),
+`--vesc-ids 21,22,23,24` (bus'taki ESC id'leri), `--bitrate 500000`,
+`--pole-pairs 7` (RPM = ERPM / pole_pairs),
 `--fw 5.2|6.0` (firmware profili, varsayılan 5.2), `--no-poll-faults`
 (fault sorgulamayı kapat), `--dash-id 250`, `--status-rate-hz 50` (VESC
 Tool'daki CAN Status Rate; frame kaybı uyarısı için), `--host`, `--http-port`.
@@ -79,7 +80,7 @@ macOS'ta portlar `/dev/cu.usbmodem*` olarak seçilir (`tty.*` ikizi atlanır).
 
 VESC Tool → App Settings → General:
 
-- Her VESC'e benzersiz **VESC ID** verin: 0, 1, 2, 3
+- Her VESC'e benzersiz **VESC ID** verin: 21, 22, 23, 24 (dashboard varsayılanı; farklıysa `--vesc-ids`)
 - **Send Can Status** = `CAN_STATUS_1_2_3_4_5` — FW 5.2'deki en geniş seçenek
   budur; STATUS_6 (ADC/PPM) FW 5.2'de **yoktur**, FW 6.00 ile gelmiştir
 - **CAN Status Rate**: varsayılan 50 Hz (`send_can_status_rate_hz`)
@@ -164,7 +165,8 @@ tam referans ve satır numaraları için `docs/CAN_PROTOCOL_FW52.md`.
 - **Fault kodu** status'larda yoktur; dashboard her VESC'i ~1 Hz'de
   `PROCESS_SHORT_BUFFER` + `COMM_GET_VALUES_SELECTIVE` (yalnız fault mask'ı)
   ile sorgular ve UI'da kırmızı rozetle gösterir
-- Bu komutlar ve ID 0–3 dışındaki tüm frame'ler sessizce yok sayılır
+- Bu komutlar ve `--vesc-ids` listesi dışındaki tüm frame'ler sessizce yok sayılır;
+  listede olmayan bir id'den status frame'i gelirse üst bar kırmızı "hatta VESC id X var" uyarısı verir
 
 **Sensorless motorlar (ör. DEGZ Ultra):** motor NTC'si bağlı olmadığından
 firmware motor sıcaklığını geçersiz okur ve −100 °C'ye sabitler; dashboard
