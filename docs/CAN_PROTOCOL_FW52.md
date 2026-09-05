@@ -272,3 +272,83 @@ Poll istekleri ArduPilot'ta `push_Frame → rx_queue_` ile CAN'e aktarılır; TX
 mailbox'ı 8 denemede boşalmazsa frame düşer (`receive()` kuyruğu). Bu yüzden
 yalnız **online** VESC'ler sorgulanır — ACK'lenmeyecek frame ArduPilot'un hata
 sayaçlarını boşuna artırır.
+
+## 9. v2 — MAVLink deniz hattı (companion → Cube → radyo → kara)
+
+Companion `MAV_COMP_ID_ONBOARD_COMPUTER` (191) olarak, otopilotla aynı sysid
+ile Cube'un TELEM2'sine yazar. ArduPilot `MAVLink_routing.cpp`
+`check_and_forward()`: `broadcast_system` (target_system 0) mesajlar öğrenilen
+tüm rotalara (GCS'nin görüldüğü radyo kanalı dahil) iletilir — doğrulandı.
+
+### Gönderilen mesajlar (`backend/uplink.py`, `--uplink-rate`, varsayılan 1 Hz)
+
+| Mesaj | Kaynak alan → MAVLink alanı | Not |
+|---|---|---|
+| `HEARTBEAT` (0) | type ONBOARD_CONTROLLER, autopilot INVALID | 1 Hz, router/GCS bileşeni görsün |
+| `ESC_TELEMETRY_1_TO_4` (ardupilotmega 11030) | temp_fet → temperature °C (u8); v_in → voltage cV (u16); \|current_motor\| → current cA (u16); ah_used → totalcurrent mAh (u16, 65.5 Ah'de sarar); \|rpm\| (mekanik) → rpm (u16); online tick sayacı → count | GCS-native; işaretler kaybolur |
+| `TUNNEL` (common 385), `payload_type = 0x5643` | aşağıdaki ikili paket | dashboard için tam veri |
+
+### TUNNEL payload (big-endian, sürüm 1, 4 + 20·N bayt)
+
+Başlık `>BHB`: version=1, seq (u16), N (kayıt sayısı). Kayıt `>BBBbhhHiHHbb`:
+
+| Alan | Tip | Ölçek | Sentinel |
+|---|---|---|---|
+| vesc_id | u8 | | |
+| flags | u8 | bit0 online, bit1 motor NTC var, bit2 fault bilgisi var | |
+| fault | u8 | mc_fault_code | |
+| duty | i8 | % | |
+| current_motor | i16 | cA (işaretli) | |
+| current_in | i16 | cA (işaretli) | |
+| v_in | u16 | cV | |
+| erpm | i32 | ×1 (işaretli) | |
+| ah_used | u16 | mAh | |
+| wh_used | u16 | 0.1 Wh | |
+| temp_fet | i8 | °C | −128 = hiç alınmadı |
+| temp_motor | i8 | °C | 127 = sensör yok → karada −100 sentinel'e çevrilir |
+
+Kara tarafı (`--mavlink-in`) TUNNEL kayıtlarını `TelemetryState.update()` ile
+işler; `online` biti 0 olan VESC güncellenmez (5 s sonra offline). TUNNEL 3 s
+gelmezse `ESC_TELEMETRY_1_TO_4` kayıplı yedek olarak kullanılır (`voltage == 0`
+= veri yok). Offline eşiği `--offline-after` (kara varsayılanı 5 s);
+`fps_expected` = online VESC × 1 × uplink hızı.
+
+### Kaynak doğrulamaları
+
+- `ESC_TELEMETRY_1_TO_4` alan tipleri: `message_definitions/v1.0/ardupilotmega.xml`
+  (id 11030: u8[4] temperature degC, u16[4] voltage cV, u16[4] current cA,
+  u16[4] totalcurrent mAh, u16[4] rpm, u16[4] count).
+- Broadcast yönlendirme: `libraries/GCS_MAVLink/MAVLink_routing.cpp:182–225`.
+- pymavlink 2.4.x: TUNNEL MAVLink2 gerektirir → `MAVLINK20=1`; `recv_match(type=[...])` list ister.
+
+## 10. MAVLink CAN forwarding (Cube üzerinden armed'de de çalışan CAN erişimi)
+
+Kaynak: ArduPilot master `371990d` — `libraries/AP_CANManager/AP_MAVLinkCAN.cpp`
+(GCS_Common.cpp yalnız dispatch eder), `libraries/AP_HAL/CANIface.h`,
+`libraries/AP_HAL_ChibiOS/CANFDIface.cpp`; mavlink `common.xml`; referans istemci
+pydronecan `dronecan/driver/mavcan.py`. Uygulama: `backend/mavcan.py`.
+
+| Bulgu | Kaynak | Dashboard'daki karşılığı |
+|---|---|---|
+| `MAV_CMD_CAN_FORWARD` (32000) `param1` **1-tabanlı** bus (`bus = int8_t(param1)-1`), 0 = durdur; kapalı arayüz → `MAV_RESULT_FAILED` | `AP_MAVLinkCAN.cpp:65-83` | `--mav-can-bus 1`; ACK≠0 logda uyarı |
+| Son istekten 5 s sonra forwarding kapanır; kontrol her 100 frame'de | `AP_MAVLinkCAN.cpp` `last_callback_enable_ms`, `frame_counter++ == 100` | 1 Hz keepalive (`FORWARD_PERIOD_S`), mavcan ile aynı |
+| **Arming kontrolü yok**; tek gereksinim `hal.can[bus]` init (`CAN_Px_DRIVER≠0`); callback'ler protokol driver'ının `receive()/send()` çağrılarından tetiklenir → `CAN_Dx_PROTOCOL=0` ile RX akmaz | `AP_MAVLinkCAN.cpp`, `AP_HAL/CANIface.cpp:59-104`, `AP_CANManager.cpp:139-170` | README: `CAN_D1_PROTOCOL=1` |
+| `CAN_FRAME` yalnız **isteyen kanala**; tek istemci struct'ı — yeni istek eskisini ezer | `can_forward.chan/system_id/component_id` | MP DroneCAN ekranı akışı çalar (README) |
+| RX **ve** otopilotun kendi TX frame'leri iletilir (`IsForwardedFrame` değilse) | `CanIface.cpp:374`, `CANFDIface.cpp:435` | Parser DroneCAN frame'lerini yok sayar |
+| Gönderim yalnız `HAVE_PAYLOAD_SPACE(chan, CAN_FRAME)` ise; kuyruk/rate limit yok → **sessiz düşürme** (`out_of_space_to_send_count`, log `MAV.times_full`) | `AP_MAVLinkCAN.cpp` callback | fps uyarısı; status rate önerisi |
+| `id` = `AP_HAL::CANFrame::id` ham: `FlagEFF=1<<31`, `FlagRTR=1<<30`, `FlagERR=1<<29`, `MaskExtID=0x1FFFFFFF` | `CANIface.h:30-34`, RX'te EFF set: `CANFDIface.cpp:768-769` | `id & 0x1FFFFFFF`, extended = bit31 |
+| Ters yol: GCS→`CAN_FRAME`(386) bus'a yazılır; burada `bus` **0-tabanlı**, extended için bit31 şart, 20'lik kuyruk, 2 ms deadline; forwarding açık olmak zorunda değil | `_handle_can_frame` | `MavlinkCanBus.send()`: `bus_index-1`, `id | FlagEFF`, 8 bayta doldur |
+| `target_system 0 / component 0` yerel işlenir | `MAVLink_routing.cpp:182-187` | Komut ve TX frame'ler 0/0 ile gönderilir; otopilot sysid öğrenmeye gerek yok |
+| SLCAN ile aynı arayüzde birlikte çalışır; SLCAN armed'de kapanır, forwarding kapanmaz | `AP_SLCANIface.cpp:439-446` | Cube yolu için önerilen transport |
+| MAVLink 2 zorunlu (id 386 > 255); kanal MAVLink2 paket görünce MAVLink2'ye geçer, `SERIALn_PROTOCOL=2` önerilir | pymavlink `mavlink_helpers`, GCS_MAVLink | `MAVLINK20=1` (`uplink.open_connection`) |
+| `CAN_FILTER_MODIFY`(388): id bits 8..23'e göre filtre; VESC ext id'de bu = komut id (id<128 için) ama `dash_id≥128` yanıtları "service" dalına düşer (`id>>16`=0) | `common.xml`, `AP_MAVLinkCAN.cpp` | Kullanılmıyor (fault yanıtlarını keserdi); ileride opsiyon |
+
+`common.xml`: `CAN_FRAME` = target_system u8, target_component u8, bus u8, len u8,
+id u32, data u8[8] (wire sırası id önce); pymavlink `can_frame_send(target_system,
+target_component, bus, len, id, data[8])`, `data` **tam 8 eleman** ister; alınan
+`msg.data` her zaman 8 int (MAVLink2 sıfır kırpması decode'da geri doldurulur).
+
+Referans istemci (mavcan.py): sysid 250 / compid 189, komutu **1 s'de bir** yeniler,
+`is_extended = id & (1<<31)`, `canid = id & 0x1FFFFFFF`, `data[:len]`, TX'te
+`bus` 0-tabanlı, `id |= 1<<31`, 8 bayta doldurma — dashboard aynı kuralları uygular.
+| Otopilot, kendi sysid **ve** compid'i ile gelen paketleri loopback sayıp atar; broadcast (target 0/0) paketler yerel işlenir ama öğrenilen tüm rotalara (radyo dahil) kopyalanır | `MAVLink_routing.cpp:101-106`, `:225-240` | `--mav-compid 1` reddedilir; hedef ilk mesajdan öğrenilir (`MavlinkCanBus.target`), sonra komut/TX o adrese gider |

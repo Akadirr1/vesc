@@ -323,9 +323,15 @@ const fpsEl = document.getElementById("fps");
 let lastMsgAt = 0;
 let serverDown = true;
 
+const NO_FRAME_HINTS = {
+  slcan: "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).",
+  mavlink: "MAVLink bağlı ama CAN_FRAME gelmiyor: CAN_D1_PROTOCOL bir sürücüye ayarlı mı, Mission Planner'ın DroneCAN ekranı forwarding'i devralmış olabilir, --mav-can-bus doğru mu? (README → MAVLink CAN forwarding)",
+  socketcan: "can0 açık ama frame yok: kablo/termination, ip link bitrate ve VESC beslemesini kontrol et.",
+};
 const BUS_LABELS = {
   connected:    ["ok",   (p) => `bağlı · ${p || ""}`],
   probing:      ["warn", (p) => `port deneniyor · ${p || ""}`],
+  mavlink:      ["ok",   (p) => `MAVLink · ${p || ""}`],
   mock:         ["ok",   () => "mock veri"],
   reconnecting: ["warn", () => "yeniden bağlanıyor…"],
   starting:     ["warn", () => "başlatılıyor…"],
@@ -349,11 +355,13 @@ function renderBus(bus) {
         `Sunucuyu --vesc-ids ${unk.join(",")} ile başlatın (şu an: ${VESC_IDS.join(",")}).`);
       return;
     }
-    setBusPill("warn", `bağlı · frame yok (${age})`,
-      "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).");
+    const hint = NO_FRAME_HINTS[bus.transport] || NO_FRAME_HINTS.slcan;
+    if (bus.note) { setBusPill("err", `bağlı · ${bus.note}`, hint); return; }
+    setBusPill("warn", `bağlı · frame yok (${age})`, hint);
     return;
   }
-  setBusPill(cls, label(bus.port));
+  const via = bus.status === "connected" && bus.transport ? ` (${bus.transport})` : "";
+  setBusPill(cls, label(bus.port) + via);
 }
 
 function renderFps(bus) {

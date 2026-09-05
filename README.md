@@ -64,9 +64,9 @@ hat eski haline döndü" sorununun sebebi budur).
 olduğunda ArduPilot tarafından otomatik kapatılır, disarm'da geri açılır
 (`update_slcan_port()`). Cube yalnızca CAN adaptörü olarak kullanılıyorsa
 (hiç arm edilmiyorsa) akış süreklidir. Armed iken de telemetri gerekiyorsa
-tek yol boot sonrası GCS'den `CAN_SLCAN_SERNUM=6` vermektir (bu yolda arming
-kontrolü yoktur; her boot'ta tekrarlanır). Dashboard kesintiyi
-"bağlı · frame yok" olarak gösterir.
+aşağıdaki **MAVLink CAN forwarding** bölümüne bak (kalıcı, arming kontrolü
+yok); geçici alternatif boot sonrası GCS'den `CAN_SLCAN_SERNUM=6`. Dashboard
+kesintiyi "bağlı · frame yok" olarak gösterir.
 
 **Bant genişliği:** ArduPilot SLCAN her frame'i timestamp'li 31 bayt olarak
 yazar ve seri TX tamponu dolarsa frame'i **sessizce düşürür**. 4 VESC × 5
@@ -75,6 +75,44 @@ Tool'da CAN Status Rate'i 20–25 Hz'e çekin ve `--status-rate-hz` ile aynı
 değeri verin.
 
 macOS'ta portlar `/dev/cu.usbmodem*` olarak seçilir (`tty.*` ikizi atlanır).
+
+## Cube üzerinden **armed iken de** çalışan yol: MAVLink CAN forwarding
+
+SLCAN, araç arm edilince ArduPilot tarafından kapatılır (yukarıdaki not). Cube
+ile armed telemetri istiyorsan CAN'i ArduPilot'un **MAVLink CAN forwarding**
+mekanizmasıyla oku: dashboard MAVLink portuna bağlanır, `MAV_CMD_CAN_FORWARD`
+gönderir, frame'ler `CAN_FRAME` mesajı olarak gelir. Arming kontrolü yoktur
+(ArduPilot `AP_MAVLinkCAN.cpp`, `docs/CAN_PROTOCOL_FW52.md` §10).
+
+```bash
+python backend/main.py --can-interface mavlink --port /dev/cu.usbmodem11201   # MAVLink portu (ilk usbmodem)
+```
+
+Cube parametreleri: `CAN_P1_DRIVER=1`, `CAN_P1_BITRATE=500000`, `CAN_D1_PROTOCOL=1`
+(driver olmadan arayüz frame pompalamaz), `SERIAL0_PROTOCOL=2` (MAVLink2 —
+`CAN_FRAME` id 386 MAVLink2 ister). `CAN_SLCAN_*` ve `SERIAL6` bu yolda gereksizdir.
+
+Bilinmesi gerekenler:
+
+- **Port paylaşımı:** dashboard MAVLink portunu tutar; Mission Planner aynı
+  anda bağlanacaksa arada router olmalı: `mavproxy.py --master=/dev/cu.usbmodem11201
+  --out udp:127.0.0.1:14550 --out udp:127.0.0.1:14551` → MP `udp:14550`,
+  dashboard `--port udpin:0.0.0.0:14551` (komutlar MAVProxy üzerinden otopilota döner).
+- **Tek istemci:** ArduPilot forwarding'i tek istemciye verir; Mission
+  Planner'ın DroneCAN/UAVCAN ekranı açılırsa akışı devralır. O ekranı kapalı tut.
+- **Keepalive:** ArduPilot 5 s istek gelmezse forwarding'i kapatır; dashboard
+  1 Hz'de yeniler. Reddedilirse (`COMMAND_ACK` ≠ 0) logda uyarı görürsün.
+- **Sessiz düşürme:** `CAN_FRAME` yalnız MAVLink TX tamponunda yer varsa
+  gönderilir (`HAVE_PAYLOAD_SPACE`). 1000 frame/s ≈ 28 KB/s USB'de sorun
+  çıkarmamalı; fps uyarısı görürsen VESC status rate'i 20–25 Hz'e çek.
+- **Fault poll** aynı kanaldan çalışır (dashboard `CAN_FRAME` göndererek bus'a
+  yazar). Cube'un kendi DroneCAN frame'leri de akışta gelir; parser yok sayar.
+- **Adresleme:** dashboard otopilotun sysid/compid'ini ilk mesajdan öğrenir ve
+  komutları ona hedefler (broadcast olsa ArduPilot radyoya da kopyalardı).
+  `--mav-compid` 1 olamaz (otopilotun kendi id'si; loopback sayılıp atılır).
+- **Telemetri uplink aynı bağlantıdan:** `--mavlink-out same` eklersen
+  `ESC_TELEMETRY_1_TO_4` + `TUNNEL` aynı porttan otopilota yazılır ve ArduPilot
+  bunları radyoya (TELEM1) iletir → karada `--mavlink-in` ile aynı arayüz.
 
 ## VESC tarafı ayarları (FW 5.2)
 
@@ -85,6 +123,74 @@ VESC Tool → App Settings → General:
   budur; STATUS_6 (ADC/PPM) FW 5.2'de **yoktur**, FW 6.00 ile gelmiştir
 - **CAN Status Rate**: varsayılan 50 Hz (`send_can_status_rate_hz`)
 - CAN baud: 500k (ArduPilot `CAN_P1_BITRATE` ile aynı)
+
+## v2 — Denizde kurulum: USB-CAN adaptör + MAVLink telemetri hattı
+
+Gemide CAN veri yolu artık Cube'dan **geçmez**: companion bilgisayar (Raspberry
+Pi vb. Linux) VESC bus'ını kendi USB-CAN adaptörüyle okur; Cube yalnız radyo
+köprüsüdür. Armed/disarmed farkı kalmaz.
+
+```
+VESC×4 ═CAN═ USB-CAN (candleLight) ─ companion ─UART→ Cube TELEM2 → TELEM1 radyo ~~~ kara: radyo → GCS → MAVLink mirror → dashboard
+```
+
+### Companion (gemi, Linux)
+
+```bash
+sudo ip link set can0 up type can bitrate 500000        # kalıcı için systemd-networkd / interfaces
+python backend/main.py --can-interface socketcan --channel can0 \
+    --mavlink-out /dev/ttyAMA0:115200 --host 0.0.0.0     # TELEM2'ye bağlı UART
+```
+
+Cube tarafı: `SERIAL2_PROTOCOL = 2` (MAVLink2), `SERIAL2_BAUD = 115`.
+`CAN_SLCAN_*` parametrelerine gerek yok. ArduPilot, companion'dan gelen
+broadcast mesajları radyo bağlantısına iletir (`MAVLink_routing.cpp`,
+`check_and_forward`: `broadcast_system` → öğrenilen tüm kanallar).
+
+### Adaptör seçimi ve olası kayıplar
+
+- **candleLight/gs_usb firmware'li adaptör** (CANable 2.0, MKS CANable, Innomaker
+  vb.) → Linux çekirdek sürücüsü, `socketcan`. USB bulk aktarım 500 kbit/s'lik
+  bus'ın tamamını (~4000 frame/s) taşır; **veri kaybı yoktur**, çekirdek kuyruğu
+  python'un okuma temposundan bağımsızdır. ArduPilot SLCAN'deki sessiz düşürme,
+  timestamp metni ve byte-byte parse yükü ortadan kalkar.
+- **slcan firmware'li** adaptör de çalışır (`--can-interface slcan --port /dev/ttyACM0`)
+  ama text protokol kalır; mümkünse candleLight flash'layın. macOS'ta gs_usb
+  sürücüsü yok → Mac'te adaptör slcan modunda kullanılır.
+- **Sonlandırma:** bus'ın iki ucunda 120 Ω olmalı. Adaptör bus'ın ortasına
+  giriyorsa termination jumper'ını **kapatın**; üçüncü sonlandırma hata üretir.
+- **İzolasyon:** izole olmayan adaptör companion toprağını VESC güç toprağına
+  bağlar (36–48 V sistemde gürültü/toprak döngüsü). Galvanik izoleli model tercih.
+- Adaptör bus'ta **aktif düğümdür** (ACK verir) — sorun değil; listen-only modda
+  fault poll (TX) çalışmaz.
+- USB gecikmesi ~1 ms; 10 Hz dashboard için anlamsız.
+
+### Kara
+
+GCS'nin MAVLink akışını yansıtın — Mission Planner: *MAVLink Mirror* (UDP) ya da
+MAVProxy: `mavproxy.py --master=/dev/tty.usbserial-XXXX --out udp:127.0.0.1:14550 --out udp:127.0.0.1:14551` — sonra:
+
+```bash
+python backend/main.py --mavlink-in udpin:0.0.0.0:14551
+```
+
+Aynı arayüz açılır; VESC'ler 5 s veri gelmezse offline sayılır, fps ≈ online
+VESC sayısı × uplink hızı. GCS ayrıca ESC 1–4 sıcaklık/voltaj/akım/RPM'i
+kendi ekranında gösterir (`ESC_TELEMETRY_1_TO_4`).
+
+### Bant genişliği (telemetriyi boğmaz)
+
+| Mesaj | Boyut (MAVLink2) | Hız | Yük |
+|---|---|---|---|
+| `ESC_TELEMETRY_1_TO_4` (GCS için) | ~56 B | 1 Hz | 0.45 kbit/s |
+| `TUNNEL` (dashboard için tam veri) | ~100 B | 1 Hz | 0.8 kbit/s |
+| `HEARTBEAT` | ~21 B | 1 Hz | 0.17 kbit/s |
+| **Toplam** | | | **≈1.4 kbit/s ≈ %2.5 @ 57.6 kbit/s** |
+
+`--uplink-rate 0.5` ile yarıya iner; `--no-esc-telemetry` ile yalnız TUNNEL
+kalır. ESC_TELEMETRY alanları unsigned'dır (akım/RPM işareti yok — rejen
+kullanılmadığından sorun değil); TUNNEL tam alan setini taşır
+(`docs/CAN_PROTOCOL_FW52.md` §9).
 
 ## Parse edilen CAN frame'leri (FW 5.2, kaynak doğrulamalı)
 
