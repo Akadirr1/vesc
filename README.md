@@ -76,6 +76,41 @@ değeri verin.
 
 macOS'ta portlar `/dev/cu.usbmodem*` olarak seçilir (`tty.*` ikizi atlanır).
 
+## Cube üzerinden **armed iken de** çalışan yol: MAVLink CAN forwarding
+
+SLCAN, araç arm edilince ArduPilot tarafından kapatılır (yukarıdaki not). Cube
+ile armed telemetri istiyorsan CAN'i ArduPilot'un **MAVLink CAN forwarding**
+mekanizmasıyla oku: dashboard MAVLink portuna bağlanır, `MAV_CMD_CAN_FORWARD`
+gönderir, frame'ler `CAN_FRAME` mesajı olarak gelir. Arming kontrolü yoktur
+(ArduPilot `AP_MAVLinkCAN.cpp`, `docs/CAN_PROTOCOL_FW52.md` §10).
+
+```bash
+python backend/main.py --can-interface mavlink --port /dev/cu.usbmodem11201   # MAVLink portu (ilk usbmodem)
+```
+
+Cube parametreleri: `CAN_P1_DRIVER=1`, `CAN_P1_BITRATE=500000`, `CAN_D1_PROTOCOL=1`
+(driver olmadan arayüz frame pompalamaz), `SERIAL0_PROTOCOL=2` (MAVLink2 —
+`CAN_FRAME` id 386 MAVLink2 ister). `CAN_SLCAN_*` ve `SERIAL6` bu yolda gereksizdir.
+
+Bilinmesi gerekenler:
+
+- **Port paylaşımı:** dashboard MAVLink portunu tutar; Mission Planner aynı
+  anda bağlanacaksa arada router olmalı: `mavproxy.py --master=/dev/cu.usbmodem11201
+  --out udp:127.0.0.1:14550 --out udp:127.0.0.1:14551` → MP `udp:14550`,
+  dashboard `--port udpin:0.0.0.0:14551` (komutlar MAVProxy üzerinden otopilota döner).
+- **Tek istemci:** ArduPilot forwarding'i tek istemciye verir; Mission
+  Planner'ın DroneCAN/UAVCAN ekranı açılırsa akışı devralır. O ekranı kapalı tut.
+- **Keepalive:** ArduPilot 5 s istek gelmezse forwarding'i kapatır; dashboard
+  1 Hz'de yeniler. Reddedilirse (`COMMAND_ACK` ≠ 0) logda uyarı görürsün.
+- **Sessiz düşürme:** `CAN_FRAME` yalnız MAVLink TX tamponunda yer varsa
+  gönderilir (`HAVE_PAYLOAD_SPACE`). 1000 frame/s ≈ 28 KB/s USB'de sorun
+  çıkarmamalı; fps uyarısı görürsen VESC status rate'i 20–25 Hz'e çek.
+- **Fault poll** aynı kanaldan çalışır (dashboard `CAN_FRAME` göndererek bus'a
+  yazar). Cube'un kendi DroneCAN frame'leri de akışta gelir; parser yok sayar.
+- **Telemetri uplink aynı bağlantıdan:** `--mavlink-out same` eklersen
+  `ESC_TELEMETRY_1_TO_4` + `TUNNEL` aynı porttan otopilota yazılır ve ArduPilot
+  bunları radyoya (TELEM1) iletir → karada `--mavlink-in` ile aynı arayüz.
+
 ## VESC tarafı ayarları (FW 5.2)
 
 VESC Tool → App Settings → General:

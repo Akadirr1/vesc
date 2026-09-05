@@ -8,39 +8,39 @@
     "hash": "c1571f7a7f451058f7ef8173f62d2063"
   },
   "CLAUDE.md": {
-    "mtime": 1788618192116.7212,
-    "hash": "e4c695953d7dc61150a225d79d8e2c4f"
+    "mtime": 1788620187772.525,
+    "hash": "84f622084c71e959f3ad7d3f575797cc"
   },
   "README.md": {
-    "mtime": 1788618192116.7212,
-    "hash": "0c2674b53575b107d2fe8daa846c36ca"
+    "mtime": 1788620187771.5442,
+    "hash": "34ec23e9c20500a9458f198f46837ed0"
   },
   "backend/main.py": {
-    "mtime": 1788618229588.3013,
-    "hash": "25ecb5b426ceced7eb04caa99687b28e"
+    "mtime": 1788620132858.886,
+    "hash": "c51f440d7b84288f7e213cf5313056d1"
   },
   "backend/static/chart.umd.min.js": {
     "mtime": 1788279239948.19,
     "hash": "3a1612b2a2ed332a6c1793fc73fa564a"
   },
   "backend/static/index.html": {
-    "mtime": 1788618192116.7212,
-    "hash": "036e624fdd6a0efe719fc199f4e0d209"
+    "mtime": 1788620132860.7808,
+    "hash": "c5c7e7c95a218a0e624295cc296680a7"
   },
   "requirements.txt": {
     "mtime": 1788618191976.7212,
     "hash": "0c8a42dd17a52912065b9903c3aeef90"
   },
   ".graphify/GRAPH_REPORT.md": {
-    "mtime": 1788618206664.722,
-    "hash": "fb1ab9a551b7726c5af3d70e853c3422"
+    "mtime": 1788618240184.7239,
+    "hash": "1da0db50b24d361632ff1a0a2d5ba884"
   },
   "docs/CAN_PROTOCOL_FW52.md": {
-    "mtime": 1788618191976.7212,
-    "hash": "478ab321b5932bba71df27c05d8789f8"
+    "mtime": 1788620187771.5442,
+    "hash": "86c578d9c4dabad953e210ff8df32561"
   },
   "backend/uplink.py": {
-    "mtime": 1788618191976.7212,
-    "hash": "93d67e5503d72cc427a46a70d616d22a"
+    "mtime": 1788620132859.9714,
+    "hash": "36f5efc334baa0319530c5141ae9684b"
   }
 }

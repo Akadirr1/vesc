@@ -320,3 +320,34 @@ gelmezse `ESC_TELEMETRY_1_TO_4` kayıplı yedek olarak kullanılır (`voltage ==
   u16[4] totalcurrent mAh, u16[4] rpm, u16[4] count).
 - Broadcast yönlendirme: `libraries/GCS_MAVLink/MAVLink_routing.cpp:182–225`.
 - pymavlink 2.4.x: TUNNEL MAVLink2 gerektirir → `MAVLINK20=1`; `recv_match(type=[...])` list ister.
+
+## 10. MAVLink CAN forwarding (Cube üzerinden armed'de de çalışan CAN erişimi)
+
+Kaynak: ArduPilot master `371990d` — `libraries/AP_CANManager/AP_MAVLinkCAN.cpp`
+(GCS_Common.cpp yalnız dispatch eder), `libraries/AP_HAL/CANIface.h`,
+`libraries/AP_HAL_ChibiOS/CANFDIface.cpp`; mavlink `common.xml`; referans istemci
+pydronecan `dronecan/driver/mavcan.py`. Uygulama: `backend/mavcan.py`.
+
+| Bulgu | Kaynak | Dashboard'daki karşılığı |
+|---|---|---|
+| `MAV_CMD_CAN_FORWARD` (32000) `param1` **1-tabanlı** bus (`bus = int8_t(param1)-1`), 0 = durdur; kapalı arayüz → `MAV_RESULT_FAILED` | `AP_MAVLinkCAN.cpp:65-83` | `--mav-can-bus 1`; ACK≠0 logda uyarı |
+| Son istekten 5 s sonra forwarding kapanır; kontrol her 100 frame'de | `AP_MAVLinkCAN.cpp` `last_callback_enable_ms`, `frame_counter++ == 100` | 1 Hz keepalive (`FORWARD_PERIOD_S`), mavcan ile aynı |
+| **Arming kontrolü yok**; tek gereksinim `hal.can[bus]` init (`CAN_Px_DRIVER≠0`); callback'ler protokol driver'ının `receive()/send()` çağrılarından tetiklenir → `CAN_Dx_PROTOCOL=0` ile RX akmaz | `AP_MAVLinkCAN.cpp`, `AP_HAL/CANIface.cpp:59-104`, `AP_CANManager.cpp:139-170` | README: `CAN_D1_PROTOCOL=1` |
+| `CAN_FRAME` yalnız **isteyen kanala**; tek istemci struct'ı — yeni istek eskisini ezer | `can_forward.chan/system_id/component_id` | MP DroneCAN ekranı akışı çalar (README) |
+| RX **ve** otopilotun kendi TX frame'leri iletilir (`IsForwardedFrame` değilse) | `CanIface.cpp:374`, `CANFDIface.cpp:435` | Parser DroneCAN frame'lerini yok sayar |
+| Gönderim yalnız `HAVE_PAYLOAD_SPACE(chan, CAN_FRAME)` ise; kuyruk/rate limit yok → **sessiz düşürme** (`out_of_space_to_send_count`, log `MAV.times_full`) | `AP_MAVLinkCAN.cpp` callback | fps uyarısı; status rate önerisi |
+| `id` = `AP_HAL::CANFrame::id` ham: `FlagEFF=1<<31`, `FlagRTR=1<<30`, `FlagERR=1<<29`, `MaskExtID=0x1FFFFFFF` | `CANIface.h:30-34`, RX'te EFF set: `CANFDIface.cpp:768-769` | `id & 0x1FFFFFFF`, extended = bit31 |
+| Ters yol: GCS→`CAN_FRAME`(386) bus'a yazılır; burada `bus` **0-tabanlı**, extended için bit31 şart, 20'lik kuyruk, 2 ms deadline; forwarding açık olmak zorunda değil | `_handle_can_frame` | `MavlinkCanBus.send()`: `bus_index-1`, `id | FlagEFF`, 8 bayta doldur |
+| `target_system 0 / component 0` yerel işlenir | `MAVLink_routing.cpp:182-187` | Komut ve TX frame'ler 0/0 ile gönderilir; otopilot sysid öğrenmeye gerek yok |
+| SLCAN ile aynı arayüzde birlikte çalışır; SLCAN armed'de kapanır, forwarding kapanmaz | `AP_SLCANIface.cpp:439-446` | Cube yolu için önerilen transport |
+| MAVLink 2 zorunlu (id 386 > 255); kanal MAVLink2 paket görünce MAVLink2'ye geçer, `SERIALn_PROTOCOL=2` önerilir | pymavlink `mavlink_helpers`, GCS_MAVLink | `MAVLINK20=1` (`uplink.open_connection`) |
+| `CAN_FILTER_MODIFY`(388): id bits 8..23'e göre filtre; VESC ext id'de bu = komut id (id<128 için) ama `dash_id≥128` yanıtları "service" dalına düşer (`id>>16`=0) | `common.xml`, `AP_MAVLinkCAN.cpp` | Kullanılmıyor (fault yanıtlarını keserdi); ileride opsiyon |
+
+`common.xml`: `CAN_FRAME` = target_system u8, target_component u8, bus u8, len u8,
+id u32, data u8[8] (wire sırası id önce); pymavlink `can_frame_send(target_system,
+target_component, bus, len, id, data[8])`, `data` **tam 8 eleman** ister; alınan
+`msg.data` her zaman 8 int (MAVLink2 sıfır kırpması decode'da geri doldurulur).
+
+Referans istemci (mavcan.py): sysid 250 / compid 189, komutu **1 s'de bir** yeniler,
+`is_extended = id & (1<<31)`, `canid = id & 0x1FFFFFFF`, `data[:len]`, TX'te
+`bus` 0-tabanlı, `id |= 1<<31`, 8 bayta doldurma — dashboard aynı kuralları uygular.

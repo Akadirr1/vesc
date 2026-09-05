@@ -159,11 +159,26 @@ def open_connection(spec: str, sysid: int, compid: int):
 
 
 class MavlinkUplink(threading.Thread):
-    """Vessel side: periodically push the current snapshot over MAVLink."""
+    """Vessel side: periodically push the current snapshot over MAVLink.
 
-    def __init__(self, cfg, state, stop: threading.Event):
+    With `shared` (a callable returning the live MavlinkCanBus, or None) the
+    uplink rides on the --can-interface mavlink connection instead of opening
+    its own: one serial port, both directions, writes serialised by bus.lock.
+    """
+
+    def __init__(self, cfg, state, stop: threading.Event, shared=None):
         super().__init__(daemon=True, name="mavlink-uplink")
-        self.cfg, self.state, self.stop = cfg, state, stop
+        self.cfg, self.state, self.stop, self.shared = cfg, state, stop, shared
+
+    def _acquire(self):
+        """(conn, lock, owned) — owned=True means we opened it and must close it."""
+        if self.shared is None:
+            return open_connection(self.cfg.mavlink_out, self.cfg.mav_sysid, self.cfg.mav_compid), threading.Lock(), True
+        bus = self.shared()
+        conn = getattr(bus, "conn", None)
+        if conn is None:
+            return None, None, False
+        return conn, bus.lock, False
 
     def run(self) -> None:
         from pymavlink import mavutil
@@ -173,35 +188,43 @@ class MavlinkUplink(threading.Thread):
         seq = 0
         counters = {vid: 0 for vid in self.cfg.vesc_ids}
         while not self.stop.is_set():
-            conn = None
+            conn = lock = None
+            owned = False
             try:
-                conn = open_connection(self.cfg.mavlink_out, self.cfg.mav_sysid, self.cfg.mav_compid)
+                conn, lock, owned = self._acquire()
+                if conn is None:  # shared transport not connected yet
+                    self.stop.wait(1.0)
+                    continue
                 log.info("MAVLink uplink: %s @ %.2f Hz (sysid %d, compid %d)",
-                         self.cfg.mavlink_out, self.cfg.uplink_rate, self.cfg.mav_sysid, self.cfg.mav_compid)
+                         "paylaşımlı CAN bağlantısı" if not owned else self.cfg.mavlink_out,
+                         self.cfg.uplink_rate, self.cfg.mav_sysid, self.cfg.mav_compid)
                 next_hb = 0.0
                 while not self.stop.is_set():
+                    if not owned and getattr(self.shared(), "conn", None) is not conn:
+                        break  # the CAN transport reconnected; pick up the new connection
                     t0 = time.time()
                     snap = self.state.snapshot(self.cfg.pole_pairs, 0.0, self.cfg.status_rate_hz)
                     vescs = snap["vescs"]
-                    if t0 >= next_hb:
-                        conn.mav.heartbeat_send(mav.MAV_TYPE_ONBOARD_CONTROLLER, mav.MAV_AUTOPILOT_INVALID,
-                                                0, 0, mav.MAV_STATE_ACTIVE)
-                        next_hb = t0 + 1.0
                     for vid in self.cfg.vesc_ids:
                         if vescs.get(str(vid), {}).get("online"):
                             counters[vid] += 1
-                    if self.cfg.esc_telemetry:
-                        conn.mav.esc_telemetry_1_to_4_send(*pack_esc_telemetry(vescs, self.cfg.vesc_ids, counters))
                     payload = pack_tunnel(vescs, seq)
                     seq += 1
-                    conn.mav.tunnel_send(0, 0, VESC_TUNNEL_TYPE, len(payload),
-                                         list(payload.ljust(TUNNEL_MAX_PAYLOAD, b"\0")))
+                    with lock:
+                        if t0 >= next_hb:
+                            conn.mav.heartbeat_send(mav.MAV_TYPE_ONBOARD_CONTROLLER, mav.MAV_AUTOPILOT_INVALID,
+                                                    0, 0, mav.MAV_STATE_ACTIVE)
+                            next_hb = t0 + 1.0
+                        if self.cfg.esc_telemetry:
+                            conn.mav.esc_telemetry_1_to_4_send(*pack_esc_telemetry(vescs, self.cfg.vesc_ids, counters))
+                        conn.mav.tunnel_send(0, 0, VESC_TUNNEL_TYPE, len(payload),
+                                             list(payload.ljust(TUNNEL_MAX_PAYLOAD, b"\0")))
                     self.stop.wait(max(0.0, period - (time.time() - t0)))
             except Exception as exc:
                 log.warning("MAVLink uplink hatası (%s) — 2 s sonra tekrar", exc)
                 self.stop.wait(2.0)
             finally:
-                if conn is not None:
+                if owned and conn is not None:
                     try:
                         conn.close()
                     except Exception:

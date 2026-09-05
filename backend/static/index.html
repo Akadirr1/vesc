@@ -354,7 +354,8 @@ function renderBus(bus) {
       "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).");
     return;
   }
-  setBusPill(cls, label(bus.port));
+  const via = bus.status === "connected" && bus.transport ? ` (${bus.transport})` : "";
+  setBusPill(cls, label(bus.port) + via);
 }
 
 function renderFps(bus) {
