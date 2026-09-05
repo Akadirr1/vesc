@@ -142,7 +142,7 @@
 <script>
 "use strict";
 
-const VESC_IDS = [0, 1, 2, 3];
+let VESC_IDS = [];  // filled from the first snapshot (--vesc-ids on the server)
 const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"];
 const WINDOW_S = 60;
 const NO_FRAMES_AFTER_S = 3;   // serial port open but no VESC frame for this long
@@ -165,12 +165,20 @@ const METRICS = {
 
 const cardRefs = {};
 const cardsEl = document.getElementById("cards");
-for (const vid of VESC_IDS) {
+const history = {};  // history[metric][vid] = [{t, v}, ...]
+
+function buildCards(ids) {
+  VESC_IDS = ids;
+  cardsEl.innerHTML = "";
+  for (const k of Object.keys(cardRefs)) delete cardRefs[k];
+  for (const m of Object.keys(METRICS)) { history[m] = {}; for (const vid of ids) history[m][vid] = []; }
+  ids.forEach((vid, i) => {
+  const color = SERIES[i % SERIES.length];
   const card = document.createElement("div");
   card.className = "card offline";
   card.innerHTML = `
     <div class="card-head">
-      <span class="swatch" style="background:${SERIES[vid]}"></span>
+      <span class="swatch" style="background:${color}"></span>
       <span class="name">VESC ${vid}</span>
       <span class="badges">
         <span class="badge-fault" data-f="fault"></span>
@@ -195,6 +203,12 @@ for (const vid of VESC_IDS) {
   const f = {};
   card.querySelectorAll("[data-f]").forEach((el) => { f[el.dataset.f] = el; });
   cardRefs[vid] = { card, f };
+  });
+  chart.data.datasets = ids.map((vid, i) => ({
+    label: `VESC ${vid}`, data: [], borderColor: SERIES[i % SERIES.length],
+    backgroundColor: SERIES[i % SERIES.length], borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+    spanGaps: false, parsing: false,
+  }));
 }
 
 const fmt = (v, d = 1) => (v == null ? "—" : v.toFixed(d));
@@ -235,12 +249,6 @@ function renderCard(vid, d) {
 
 /* ---------- time chart ---------- */
 
-// history[metric][vid] = [{t, v}, ...] (client clock, pruned to WINDOW_S)
-const history = {};
-for (const m of Object.keys(METRICS)) {
-  history[m] = {};
-  for (const vid of VESC_IDS) history[m][vid] = [];
-}
 let activeMetric = "rpm";
 
 const css = getComputedStyle(document.documentElement);
@@ -251,17 +259,7 @@ Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 const chart = new Chart(document.getElementById("chart"), {
   type: "line",
   data: {
-    datasets: VESC_IDS.map((vid) => ({
-      label: `VESC ${vid}`,
-      data: [],
-      borderColor: SERIES[vid],
-      backgroundColor: SERIES[vid],
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      spanGaps: false,
-      parsing: false,
-    })),
+    datasets: [],  // built by buildCards() from the server's VESC id list
   },
   options: {
     animation: false,
@@ -345,6 +343,12 @@ function renderBus(bus) {
   // auto-disabled on arming (SERIALn_PROTOCOL path) or the VESCs are off.
   if (bus.status === "connected" && (bus.frame_age == null || bus.frame_age > NO_FRAMES_AFTER_S)) {
     const age = bus.frame_age == null ? "hiç" : `${Math.round(bus.frame_age)} s`;
+    const unk = bus.unknown_ids || [];
+    if (unk.length) {
+      setBusPill("err", `bağlı · hatta VESC id ${unk.join(", ")} var, listede yok`,
+        `Sunucuyu --vesc-ids ${unk.join(",")} ile başlatın (şu an: ${VESC_IDS.join(",")}).`);
+      return;
+    }
     setBusPill("warn", `bağlı · frame yok (${age})`,
       "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).");
     return;
@@ -364,6 +368,8 @@ function renderFps(bus) {
 function onSnapshot(snap) {
   lastMsgAt = performance.now();
   serverDown = false;
+  const ids = snap.vesc_ids || Object.keys(snap.vescs).map(Number);
+  if (ids.length !== VESC_IDS.length || ids.some((v, i) => v !== VESC_IDS[i])) buildCards(ids);
 
   renderBus(snap.bus);
   renderFps(snap.bus);
