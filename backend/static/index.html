@@ -142,12 +142,17 @@
 <script>
 "use strict";
 
-const VESC_IDS = [0, 1, 2, 3];
+let VESC_IDS = [];  // filled from the first snapshot (--vesc-ids on the server)
 const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"];
 const WINDOW_S = 60;
 const NO_FRAMES_AFTER_S = 3;   // serial port open but no VESC frame for this long
 const STALE_FAULT_S = 5;       // must match backend STALE_FAULT_S
 const FPS_LOSS_RATIO = 0.7;    // warn when measured fps < 70 % of expected
+// The sensorless FOC observer jitters a few ERPM at standstill (VESC Tool
+// shows the same). Clamp tiny RPM to 0 and keep a minimum y-span so the
+// chart never auto-zooms into that noise.
+const RPM_DEADBAND = 5;                                    // mechanical RPM
+const MIN_SPAN = { rpm: 200, current: 4, temp: 10, voltage: 2 };
 
 const METRICS = {
   rpm:     { key: "rpm",           label: "RPM" },
@@ -160,12 +165,20 @@ const METRICS = {
 
 const cardRefs = {};
 const cardsEl = document.getElementById("cards");
-for (const vid of VESC_IDS) {
+const history = {};  // history[metric][vid] = [{t, v}, ...]
+
+function buildCards(ids) {
+  VESC_IDS = ids;
+  cardsEl.innerHTML = "";
+  for (const k of Object.keys(cardRefs)) delete cardRefs[k];
+  for (const m of Object.keys(METRICS)) { history[m] = {}; for (const vid of ids) history[m][vid] = []; }
+  ids.forEach((vid, i) => {
+  const color = SERIES[i % SERIES.length];
   const card = document.createElement("div");
   card.className = "card offline";
   card.innerHTML = `
     <div class="card-head">
-      <span class="swatch" style="background:${SERIES[vid]}"></span>
+      <span class="swatch" style="background:${color}"></span>
       <span class="name">VESC ${vid}</span>
       <span class="badges">
         <span class="badge-fault" data-f="fault"></span>
@@ -190,6 +203,12 @@ for (const vid of VESC_IDS) {
   const f = {};
   card.querySelectorAll("[data-f]").forEach((el) => { f[el.dataset.f] = el; });
   cardRefs[vid] = { card, f };
+  });
+  chart.data.datasets = ids.map((vid, i) => ({
+    label: `VESC ${vid}`, data: [], borderColor: SERIES[i % SERIES.length],
+    backgroundColor: SERIES[i % SERIES.length], borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+    spanGaps: false, parsing: false,
+  }));
 }
 
 const fmt = (v, d = 1) => (v == null ? "—" : v.toFixed(d));
@@ -212,7 +231,8 @@ function renderCard(vid, d) {
   f.fault.classList.toggle("stale", staleFault);
   f.fault.textContent = hasFault ? (d.fault_name || `FAULT ${d.fault}`) + (staleFault ? " ?" : "") : "";
   f.fault.title = staleFault ? `Son fault yanıtı ${d.fault_age} s önce — güncel olmayabilir` : "";
-  f.rpm.textContent = d.rpm == null ? "—" : Math.round(d.rpm).toLocaleString("tr-TR");
+  const rpm = d.rpm == null ? null : (Math.abs(d.rpm) < RPM_DEADBAND ? 0 : d.rpm);
+  f.rpm.textContent = rpm == null ? "—" : (Math.round(rpm) || 0).toLocaleString("tr-TR");
   f.erpm.textContent = d.erpm == null ? "" : `ERPM ${Math.round(d.erpm).toLocaleString("tr-TR")}`;
   f.duty.innerHTML = unit(fmt(d.duty == null ? null : d.duty * 100, 1), "%");
   f.current_motor.innerHTML = unit(fmt(d.current_motor), "A");
@@ -229,12 +249,6 @@ function renderCard(vid, d) {
 
 /* ---------- time chart ---------- */
 
-// history[metric][vid] = [{t, v}, ...] (client clock, pruned to WINDOW_S)
-const history = {};
-for (const m of Object.keys(METRICS)) {
-  history[m] = {};
-  for (const vid of VESC_IDS) history[m][vid] = [];
-}
 let activeMetric = "rpm";
 
 const css = getComputedStyle(document.documentElement);
@@ -245,17 +259,7 @@ Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 const chart = new Chart(document.getElementById("chart"), {
   type: "line",
   data: {
-    datasets: VESC_IDS.map((vid) => ({
-      label: `VESC ${vid}`,
-      data: [],
-      borderColor: SERIES[vid],
-      backgroundColor: SERIES[vid],
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      spanGaps: false,
-      parsing: false,
-    })),
+    datasets: [],  // built by buildCards() from the server's VESC id list
   },
   options: {
     animation: false,
@@ -299,6 +303,13 @@ function refreshChart() {
   chart.data.datasets.forEach((ds, i) => {
     ds.data = history[activeMetric][VESC_IDS[i]].map((p) => ({ x: p.t - now, y: p.v }));
   });
+  // Minimum y-span: autoscale only once the data actually moves more than this.
+  let lo = Infinity, hi = -Infinity;
+  for (const ds of chart.data.datasets) for (const p of ds.data) { if (p.y < lo) lo = p.y; if (p.y > hi) hi = p.y; }
+  const span = MIN_SPAN[activeMetric];
+  const y = chart.options.scales.y;
+  if (isFinite(lo) && hi - lo < span) { const mid = (lo + hi) / 2; y.min = mid - span / 2; y.max = mid + span / 2; }
+  else { delete y.min; delete y.max; }
   chart.update("none");
 }
 
@@ -332,6 +343,12 @@ function renderBus(bus) {
   // auto-disabled on arming (SERIALn_PROTOCOL path) or the VESCs are off.
   if (bus.status === "connected" && (bus.frame_age == null || bus.frame_age > NO_FRAMES_AFTER_S)) {
     const age = bus.frame_age == null ? "hiç" : `${Math.round(bus.frame_age)} s`;
+    const unk = bus.unknown_ids || [];
+    if (unk.length) {
+      setBusPill("err", `bağlı · hatta VESC id ${unk.join(", ")} var, listede yok`,
+        `Sunucuyu --vesc-ids ${unk.join(",")} ile başlatın (şu an: ${VESC_IDS.join(",")}).`);
+      return;
+    }
     setBusPill("warn", `bağlı · frame yok (${age})`,
       "Seri port açık ama VESC frame'i gelmiyor: VESC'ler kapalı olabilir ya da ArduPilot SLCAN'i arm sırasında kapatmış olabilir (README → SLCAN).");
     return;
@@ -351,6 +368,8 @@ function renderFps(bus) {
 function onSnapshot(snap) {
   lastMsgAt = performance.now();
   serverDown = false;
+  const ids = snap.vesc_ids || Object.keys(snap.vescs).map(Number);
+  if (ids.length !== VESC_IDS.length || ids.some((v, i) => v !== VESC_IDS[i])) buildCards(ids);
 
   renderBus(snap.bus);
   renderFps(snap.bus);
@@ -363,7 +382,8 @@ function onSnapshot(snap) {
     if (d && d.online) {
       if (d.v_in != null && d.current_in != null) { power += d.v_in * d.current_in; powerKnown = true; }
       for (const [m, def] of Object.entries(METRICS)) {
-        const v = d[def.key];
+        let v = d[def.key];
+        if (m === "rpm" && v != null && Math.abs(v) < RPM_DEADBAND) v = 0;
         if (v != null) {
           const buf = history[m][vid];
           buf.push({ t: now, v });
